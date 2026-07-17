@@ -1,0 +1,8 @@
+path: /home/delpiyero/Staj/dataset
+train: images/train
+val: images/val
+
+names:
+  0: cargo_box
+  1: vehicle
+  2: person

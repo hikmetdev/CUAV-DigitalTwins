@@ -1,0 +1,25 @@
+# Ortam / gizli anahtarlar
+config/.env
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Loglar
+logs/
+
+# Model ağırlıkları — büyük binary dosyalar, git'e girmemeli.
+# Bunlar proje kökünde kalmak zorunda: yolo.py modeli göreli yolla yükler ve
+# ultralytics MobileCLIP'i çalışma dizininden okur (app.py cwd'yi BASE_DIR'e sabitler).
+yoloe-26s-seg.pt
+mobileclip2_b.ts
+*.pt
+*.engine
+
+# Eğitim çıktıları
+runs/
+
+# Veriseti içeriği (iskelet + data.yaml korunur)
+dataset/images/
+dataset/labels/

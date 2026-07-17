@@ -1,0 +1,326 @@
+<?xml version="1.0" ?>
+<sdf version="1.7">
+  <world name="runway_straight_route">
+    <physics name="1ms" type="ignore">
+      <max_step_size>0.001</max_step_size>
+      <real_time_factor>1</real_time_factor>
+    </physics>
+
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+
+    <scene>
+      <ambient>1.0 1.0 1.0</ambient>
+      <background>0.8 0.8 0.8</background>
+      <sky/>
+    </scene>
+
+    <spherical_coordinates>
+      <latitude_deg>39.920782</latitude_deg>
+      <longitude_deg>32.854115</longitude_deg>
+      <elevation>584</elevation>
+      <heading_deg>0</heading_deg>
+      <surface_model>EARTH_WGS84</surface_model>
+    </spherical_coordinates>
+
+    <light type="directional" name="sun">
+      <cast_shadows>true</cast_shadows>
+      <pose>0 0 10 0 0 0</pose>
+      <diffuse>0.8 0.8 0.8 1</diffuse>
+      <specular>0.8 0.8 0.8 1</specular>
+      <attenuation>
+        <range>1000</range>
+        <constant>0.9</constant>
+        <linear>0.01</linear>
+        <quadratic>0.001</quadratic>
+      </attenuation>
+      <direction>-0.5 0.1 -0.9</direction>
+    </light>
+
+    <!-- Pist +Y (Kuzey) yonunde kaydirildi; ucak Y=0 guney basinda dogar, 900 m rotayi pist uzerinde ucar. -->
+    <include>
+      <pose>0 700 0 0 0 0</pose>
+      <uri>file:///home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/runway/model.sdf</uri>
+    </include>
+
+    <include>
+      <pose degrees="true">0 0 0.2 0 0 90</pose>
+      <uri>file:///home/delpiyero/Staj/models/siha_mini_talon/model.sdf</uri>
+    </include>
+
+    <!-- ============ ROTA CISIMLERI (buyutulmus + cogaltilmis) ============
+         Kutular 2->4 m; QR/turuncu texture ile yuksek kontrast (tespit icin kenar).
+         Yeni turler: dumpster (konteyner/kutu) ve flatbed trailer (kamyon).
+         X = yana kaciklik (+-5 m kamera gorusunde), Y = kalkistan mesafe (m). -->
+
+    <model name="route_qr_box_1">
+      <static>true</static>
+      <pose>0 200 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/qr_box/materials/textures/qr_code.png</albedo_map>
+              <roughness>0.6</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <include>
+      <uri>file:///home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/daf_xf_450_tractor/model.sdf</uri>
+      <name>route_tractor_1</name>
+      <pose degrees="true">4 280 0.94 0 0 0</pose>
+    </include>
+
+    <!-- Sirt cantasi (T-03): eski dumpster'in yerini aldi; konum korundu
+         (X=0 rota merkezi, Y=330 => kamerada yarim kalmiyor). Gercek olcek
+         (~0.5m) 15m irtifada birkac piksel eder; QR/turuncu kutu mantigiyla
+         hedef boyutuna buyutuldu. Duz renk tepeden gurultu tabaninda kaliyor,
+         bu yuzden tepe yuzu backpack.png dokusuyla kaplandi
+         (models/textures/make_backpack_texture.py uretir) — kenar/deseni
+         esasen bu doku tasiyor. -->
+    <model name="route_backpack_1">
+      <static>true</static>
+      <pose>0 330 0.7 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.2 4.2 1.4</size></box></geometry></collision>
+        <visual name="body">
+          <geometry><box><size>3.2 4.2 1.4</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/backpack.png</albedo_map>
+              <roughness>0.9</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+        <!-- Tasima sapi: dokudaki sapin uzerine denk gelir. Omuz askilari
+             KASITLI yok — doku cantanin on yuzu (on cep + fermuar), on yuzu
+             yukari bakan bir cantada askilar altta kalir; tepeye ayrica askı
+             kutusu koymak hem celiskili olur hem de tanimayi saglayan doku
+             detayini iki koyu bantla orterdi. -->
+        <visual name="handle">
+          <pose>0 1.75 0.80 0 0 0</pose>
+          <geometry><box><size>1.0 0.35 0.26</size></box></geometry>
+          <material>
+            <ambient>0.10 0.13 0.20 1</ambient>
+            <diffuse>0.10 0.13 0.20 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="route_orange_box_1">
+      <static>true</static>
+      <pose>0 440 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <material>
+            <ambient>0.95 0.45 0.05 1</ambient>
+            <diffuse>0.95 0.45 0.05 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Drone (T-05): eski flatbed trailer'in yerini aldi, konumu korundu
+         (X=4, Y=520). Hazir quadcopter modelleri (hexapod_copter, bicopter)
+         ucus eklentileri + onlarca link/joint tasidigi icin sabit dekor olarak
+         uygun degil; primitiflerden statik bir quad kuruldu. Tepeden bakista
+         ayirt edici olan X govde + 4 rotor diski silueti: koyu govde/kollar,
+         acik gri pervaneler => yesil cim uzerinde yuksek kontrast ve YOLOE'nin
+         istedigi kenar yogunlugu. Rotor merkezleri (+-1.77, +-1.77), acikligi
+         ~5.7 m — 15m irtifada 4m'lik kutularla ayni buyukluk sinifinda. -->
+    <model name="route_drone_1">
+      <static>true</static>
+      <pose>4 520 0.45 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>5.2 5.2 0.6</size></box></geometry></collision>
+        <!-- Govde: koyu merkez kutu + acik ust plaka (ic kenar uretir). -->
+        <visual name="body">
+          <geometry><box><size>1.8 1.8 0.5</size></box></geometry>
+          <material>
+            <ambient>0.10 0.10 0.12 1</ambient>
+            <diffuse>0.10 0.10 0.12 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+        <visual name="top_plate">
+          <pose>0 0 0.27 0 0 0</pose>
+          <geometry><box><size>1.2 1.2 0.06</size></box></geometry>
+          <material>
+            <ambient>0.45 0.47 0.50 1</ambient>
+            <diffuse>0.45 0.47 0.50 1</diffuse>
+          </material>
+        </visual>
+        <!-- X kollar: iki capraz bant. -->
+        <visual name="arm_a">
+          <pose>0 0 0 0 0 0.7854</pose>
+          <geometry><box><size>5.0 0.36 0.20</size></box></geometry>
+          <material>
+            <ambient>0.13 0.13 0.15 1</ambient>
+            <diffuse>0.13 0.13 0.15 1</diffuse>
+          </material>
+        </visual>
+        <visual name="arm_b">
+          <pose>0 0 0 0 0 -0.7854</pose>
+          <geometry><box><size>5.0 0.36 0.20</size></box></geometry>
+          <material>
+            <ambient>0.13 0.13 0.15 1</ambient>
+            <diffuse>0.13 0.13 0.15 1</diffuse>
+          </material>
+        </visual>
+        <!-- Motorlar + pervaneler: kol uclarinda 4 kose. -->
+        <visual name="motor_fl">
+          <pose>-1.77 1.77 0.16 0 0 0</pose>
+          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
+          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
+        </visual>
+        <visual name="prop_fl">
+          <pose>-1.77 1.77 0.40 0 0 0</pose>
+          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
+          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
+        </visual>
+        <visual name="motor_fr">
+          <pose>1.77 1.77 0.16 0 0 0</pose>
+          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
+          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
+        </visual>
+        <visual name="prop_fr">
+          <pose>1.77 1.77 0.40 0 0 0</pose>
+          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
+          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
+        </visual>
+        <visual name="motor_rl">
+          <pose>-1.77 -1.77 0.16 0 0 0</pose>
+          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
+          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
+        </visual>
+        <visual name="prop_rl">
+          <pose>-1.77 -1.77 0.40 0 0 0</pose>
+          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
+          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
+        </visual>
+        <visual name="motor_rr">
+          <pose>1.77 -1.77 0.16 0 0 0</pose>
+          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
+          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
+        </visual>
+        <visual name="prop_rr">
+          <pose>1.77 -1.77 0.40 0 0 0</pose>
+          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
+          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="route_qr_box_2">
+      <static>true</static>
+      <pose>-4 600 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/qr_box/materials/textures/qr_code.png</albedo_map>
+              <roughness>0.6</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <actor name="route_human_1">
+      <skin>
+        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+        <scale>4.5</scale>
+      </skin>
+      <animation name="walk">
+        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0.0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walk">
+          <waypoint><time>0.0</time><pose>-3 670 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>5.0</time><pose>3 670 1.0 0 0 1.57</pose></waypoint>
+          <waypoint><time>10.0</time><pose>3 680 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>15.0</time><pose>-3 680 1.0 0 0 -1.57</pose></waypoint>
+          <waypoint><time>20.0</time><pose>-3 670 1.0 0 0 3.14</pose></waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+    <include>
+      <uri>file:///home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/daf_xf_450_tractor/model.sdf</uri>
+      <name>route_tractor_2</name>
+      <pose degrees="true">4 740 0.94 0 0 0</pose>
+    </include>
+
+    <model name="route_orange_box_2">
+      <static>true</static>
+      <pose>-3 810 2.0 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <material>
+            <ambient>0.95 0.45 0.05 1</ambient>
+            <diffuse>0.95 0.45 0.05 1</diffuse>
+            <specular>0.2 0.2 0.2 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <actor name="route_human_2">
+      <skin>
+        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+        <scale>4.5</scale>
+      </skin>
+      <animation name="walk">
+        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0.0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walk">
+          <waypoint><time>0.0</time><pose>-3 850 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>5.0</time><pose>3 850 1.0 0 0 1.57</pose></waypoint>
+          <waypoint><time>10.0</time><pose>3 860 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>15.0</time><pose>-3 860 1.0 0 0 -1.57</pose></waypoint>
+          <waypoint><time>20.0</time><pose>-3 850 1.0 0 0 3.14</pose></waypoint>
+        </trajectory>
+      </script>
+    </actor>
+  </world>
+</sdf>

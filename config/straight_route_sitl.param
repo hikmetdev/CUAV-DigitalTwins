@@ -1,0 +1,4 @@
+# SITL-only demo parameters.
+# Disables pre-arm sensor consistency checks so the fixed-wing mission starts
+# promptly after the GCS enables autonomous flight. Do not use this on hardware.
+ARMING_CHECK 0
