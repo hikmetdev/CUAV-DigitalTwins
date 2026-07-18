@@ -87,6 +87,7 @@ from styles import DARK_THEME_QSS
 from interface import CompassWidget, CameraSimulatorWidget, TimelineWidget, TacticalMapWidget
 from threads import (CameraStreamThread, TelemetryStreamThread, DetectionStreamThread,
                      GeminiChatThread, McpClient, McpError)
+from scene_db import SceneDatabase
 
 # ----------------------------------------------------------------------
 # LOGGING SETUP
@@ -200,6 +201,21 @@ class GroundControlStation(QMainWindow):
             "Sistemler kararlı. Kamera ve telemetri yayını bekleniyor..."
         ]
         self.vlm_index = 0
+
+        # Sahne özeti veritabanı: panelde gösterilen her özet database/<build>.db
+        # SQLite dosyasına da yazılır (dosya adı = bu koşunun log klasörü adı).
+        # DB açılamazsa uçuş arayüzü etkilenmez, kayıt sessizce devre dışı kalır.
+        try:
+            self.scene_db = SceneDatabase(
+                os.path.join(BASE_DIR, "database"), os.path.basename(BUILD_DIR)
+            )
+            # NOT: logs_terminal henüz kurulmadı; terminal yerine dosya loguna yaz.
+            logger.info(
+                f"Sahne özeti veritabanı hazır: database/{os.path.basename(BUILD_DIR)}.db"
+            )
+        except Exception as exc:
+            self.scene_db = None
+            logger.warning(f"Sahne özeti veritabanı açılamadı: {exc}")
 
         # AI Copilot (Gemini) durumu: canlı tool-çağıran asistan.
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -1148,6 +1164,15 @@ class GroundControlStation(QMainWindow):
                     self.vlm_text_box.setHtml(html_content)
                     # Scroll to bottom
                     self.vlm_text_box.verticalScrollBar().setValue(self.vlm_text_box.verticalScrollBar().maximum())
+                    # Gösterilen özeti veritabanına işle (yalnızca içerik
+                    # değiştiyse satır yazılır; SceneDatabase dedup yapar).
+                    if self.scene_db is not None:
+                        self.scene_db.record(
+                            "\n".join(messages), source="detection",
+                            telemetry=self.telemetry,
+                            mission_time_s=time.time() - self.mission_start_ts,
+                            message_count=len(messages),
+                        )
                     return True
             except Exception as e:
                 logger.warning(f"yolo.log okunurken hata oluştu: {e}")
@@ -1159,6 +1184,13 @@ class GroundControlStation(QMainWindow):
         summary = self.vlm_summaries[self.vlm_index]
         self.vlm_text_box.setHtml(f"<div style='margin-bottom: 6px; line-height: 1.3;'>• {summary}</div>")
         self.vlm_index = (self.vlm_index + 1) % len(self.vlm_summaries)
+        # Yer tutucu özet de arayüzde "gösterilen" içeriktir; kaydet (dedup
+        # sayesinde aynı metin dönerken tek satır kalır).
+        if self.scene_db is not None:
+            self.scene_db.record(
+                summary, source="placeholder", telemetry=self.telemetry,
+                mission_time_s=time.time() - self.mission_start_ts,
+            )
 
     # ------------------------------------------------------------------
     # BOTTOM COLLAPSIBLE LOGS TERMINAL
@@ -1634,6 +1666,10 @@ class GroundControlStation(QMainWindow):
         # MCP araç sunucusunu durdur
         if getattr(self, "mcp_client", None) is not None:
             self.mcp_client.stop()
+
+        # Sahne özeti veritabanını kapat
+        if getattr(self, "scene_db", None) is not None:
+            self.scene_db.close()
     
 
         if hasattr(self, "otonom_flight_process") and self.otonom_flight_process is not None:
