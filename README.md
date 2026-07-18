@@ -31,16 +31,6 @@ müdahale edebilirsiniz.
 Sıradan bir demo değil: buradaki her eşik, her prompt, her cisim **ölçülerek** seçildi.
 Neyin çalışmadığı da (ve neden çalışmadığı da) kodun içinde belgeli.
 
-## ✨ Öne çıkanlar
-
-| | Özellik | Detay |
-|---|---|---|
-| 🗣️ | **Sohbetle uçuş kontrolü** | "sola dön", "irtifayı 30 m'ye çıkar", "rotaya devam et" → Gemini, MCP araçlarıyla `MAV_CMD_DO_REPOSITION` gönderir. Otonom kontrolcü operatörü **ezmez**: manuel komutta rota izleme askıya alınır, "devam et" ile kaldığı yerden sürer. |
-| 🔌 | **Gerçek MCP mimarisi** | AI araçları (13 adet) uygulamaya gömülü değil — bağımsız bir **Model Context Protocol** sunucusunda yaşar (stdio üzerinde JSON-RPC 2.0, sıfır ek bağımlılık). Araçlar çalışma anında keşfedilir; yarın Gemini yerine başka bir LLM taksanız kod değişmez. |
-| 👁️ | **Ölçüm güdümlü tespit** | YOLOE açık-sözlük modeli; prompt listesi rotayla birebir eşleşir. Katmanlı sahte-pozitif savunması: fiziksel boyut kapısı (irtifa+FOV'dan metre hesabı), kendi-gölge bastırma, iç içe kutu filtresi, sınıf bazlı güven tabanları. |
-| 📦 | **QR + renk zekâsı** | 15 m irtifadan kutu üzerindeki QR metni çözülür (4× büyütme hilesiyle); kırmızı/mavi kargo kutuları tespit sonrası HSV analiziyle ayırt edilir — çünkü ölçüm gösterdi ki nadir bakışta modeli ateşleyen şey renk değil, **desen kontrastı**. |
-| 🗺️ | **Canlı taktik GCS** | PySide6 arayüz: QPainter taktik harita, kutulanmış kamera akışı, telemetri/pusula, tespit tablosu, zaman çizelgesi ve uçuş sonunda tek tuşla taktik rapor. |
-| 💻 | **Mütevazı donanımda çalışır** | 8 GB RAM + GTX 1650 hedeflendi: FPS/çözünürlük sınırlama, GPU/CPU iş bölümü, zram takası — OOM çökmesine karşı savunma dahil. |
 
 ## 🏗️ Mimari
 
