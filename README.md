@@ -152,6 +152,5 @@ altına ayrışır.
 
 <div align="center">
 
-*Bir staj projesinin "keşke gerçek dünyada da her karar böyle ölçülerek alınsa" hâli.*
 
 </div>
