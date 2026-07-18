@@ -14,6 +14,7 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import NavSatFix
+from std_msgs.msg import String
 from geographic_msgs.msg import GeoPoseStamped
 from mavros_msgs.msg import Waypoint
 from mavros_msgs.srv import SetMode, CommandBool, CommandTOL, WaypointPush, WaypointClear, CommandInt, CommandLong
@@ -31,7 +32,7 @@ STRAIGHT_ROUTE_HEADING_DEG = 0.0
 ROUTE_TARGET_SPECS = [
     ("T-01", 200.0),
     ("T-02", 280.0),
-    ("T-03", 360.0),
+    ("T-03", 330.0),
     ("T-04", 440.0),
     ("T-05", 520.0),
     ("T-06", 600.0),
@@ -73,6 +74,19 @@ class UavController(Node):
             self.gps_callback,
             qos_profile
         )
+
+        # Operatör devralma kanalı: AI Copilot'un MCP uçuş komutları
+        # (mcp_server.py FlightCommander) her komutta bu konuya yayın yapar.
+        # Görülünce otonom rota izleme (900 m LOITER kuralı dahil) bırakılır —
+        # aksi hâlde operatör uçağı başka yöne çevirdiğinde home'dan uzaklık
+        # 900 m'yi aşar aşmaz bu düğüm uçağı LOITER'a zorlayıp komutu ezerdi.
+        self.operator_override = False
+        self.override_sub = self.create_subscription(
+            String,
+            "/siha/operator_override",
+            self.override_callback,
+            10
+        )
         
         self.local_pos_pub = self.create_publisher(
             PoseStamped,
@@ -109,6 +123,26 @@ class UavController(Node):
 
     def gps_callback(self, msg):
         self.current_gps = msg
+
+    def override_callback(self, msg):
+        # 'resume_route': operatör otonom rotaya dönmek istiyor — askı kalkar,
+        # CRUISING döngüsü GUIDED + rota hedefini yeniden gönderip sürer.
+        if msg.data == "resume_route":
+            if self.operator_override:
+                self.operator_override = False
+                self.get_logger().info(
+                    "Operatör otonom rotaya dönüş istedi; rota izleme "
+                    "kaldığı yerden devam ediyor."
+                )
+            return
+        # Diğer tüm mesajlar = manuel uçuş komutu. Her komutta yayın gelir;
+        # yalnızca ilkinde loglayıp bayrağı kur.
+        if not self.operator_override:
+            self.operator_override = True
+            self.get_logger().info(
+                f"Operatör uçuş kontrolünü devraldı ({msg.data}); "
+                "otonom rota izleme askıya alındı ('rotaya devam et' ile sürer)."
+            )
 
     def wait_for_services(self):
         self.get_logger().info("MAVROS servislerinin bağlanması bekleniyor...")
@@ -415,15 +449,37 @@ class UavController(Node):
         # geçişi yalnızca bilgi amaçlı loglanır (navigasyonu etkilemez).
         last_log_time = 0
         passed_objects = set()
-        self.send_route_target()
+        # Rota hedefi gerektiğinde BİR kez gönderilir: görev başında ve her
+        # operatör devralması sonrası 'resume_route' dönüşünde.
+        target_needs_send = True
         while rclpy.ok() and self.phase == "CRUISING":
+            # Operatör devraldıysa rota izleme ASKIDA bekler; döngü canlı kalır
+            # ki 'resume_route' gelince kaldığı yerden sürebilsin. Askıda 900 m
+            # kuralı da işlemez — operatörün komutu ezilmez.
+            if self.operator_override:
+                target_needs_send = True
+                time.sleep(0.2)
+                continue
+            if target_needs_send:
+                # Devralma dönüşünde uçak fly_forward sonrası LOITER'da olabilir;
+                # GUIDED'a çekip rota hedefini yeniden gönder (görev başındaki
+                # ilk gönderimde mod zaten GUIDED, çağrı zararsız).
+                self.set_mode("GUIDED")
+                self.send_route_target()
+                target_needs_send = False
             now = time.time()
+            # Kat edilen mesafe = rotanın KUZEY ekseni üzerindeki ilerleme
+            # (izdüşüm; rota sabit 0° kuzey olduğu için enlem farkı yeterli).
+            # Düz kuş-uçuşu uzaklık kullanılsaydı, operatör detourundan dönüşte
+            # yana kaçıklık 900 m kuralını olduğundan erken tetikleyebilirdi.
             traveled = self.distance_m(
                 self.home_lat,
                 self.home_lon,
                 self.current_gps.latitude,
-                self.current_gps.longitude,
+                self.home_lon,
             )
+            if self.current_gps.latitude < self.home_lat:
+                traveled = 0.0
 
             # Yol üstündeki cisimlerin üzerinden geçişi bir kez logla.
             for name, tlat, tlon in self.route_targets:

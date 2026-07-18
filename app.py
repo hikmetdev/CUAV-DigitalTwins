@@ -3,22 +3,11 @@ import os
 import math
 import json
 os.environ["RCUTILS_LOGGING_SEVERITY_THRESHOLD"] = "ERROR"
-# 8 GB RAM / GTX 1650 gibi sınırlı sistemlerde Qt WebEngine (Chromium) haritası
-# RAM/VRAM ve GPU süreç çökmelerinin başlıca kaynağı. Tek renderer süreci, GPU
-# derlemeyi kapatma ve JS heap sınırı ile ayak izini küçült (setdefault: override edilebilir).
-os.environ.setdefault(
-    "QTWEBENGINE_CHROMIUM_FLAGS",
-    "--disable-gpu --disable-gpu-compositing --disable-dev-shm-usage "
-    "--renderer-process-limit=1 --js-flags=--max-old-space-size=64 --log-level=3"
-)
+# NOT: Takip haritası artık QtWebEngine/Leaflet değil, yerli QPainter widget'ı
+# (interface/harita.py). CDN'e ve Chromium renderer'ına bağımlılık kalmadığı
+# için harita ağ/GPU/heap sorunlarında boş kalmaz; 8 GB RAM'de en büyük
+# RAM/çökme kaynağı (WebEngine) da devreden çıkmış olur.
 
-# Chromium / QtWebEngine tarafındaki C++ stderr uyarısını (GPUInfo not initialized on GpuInfoUpdate) gizle
-try:
-    _devnull_fd = os.open(os.devnull, os.O_WRONLY)
-    os.dup2(_devnull_fd, 2)
-    os.close(_devnull_fd)
-except Exception:
-    pass
 from datetime import datetime
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -61,16 +50,15 @@ START_LON = 32.854115
 # Harita önizleme hedefleri — worlds/vtail_straight_route.sdf'teki cisimlerle
 # birebir aynı (id, tür, kalkıştan mesafe). World değişirse burası da güncellenir.
 TARGET_DETECTIONS = [
-    {"id": "T-01", "type": "Kutu",      "conf": 0.90, "time": "12:30:00", "distance_m": 200.0},
-    {"id": "T-02", "type": "Araç",      "conf": 0.90, "time": "12:31:00", "distance_m": 280.0},
-    {"id": "T-03", "type": "Sırt Çantası", "conf": 0.90, "time": "12:32:00", "distance_m": 360.0},
-    {"id": "T-04", "type": "Kutu",      "conf": 0.90, "time": "12:33:00", "distance_m": 440.0},
-    {"id": "T-05", "type": "Drone",     "conf": 0.90, "time": "12:34:00", "distance_m": 520.0},
-    {"id": "T-06", "type": "Kutu",      "conf": 0.90, "time": "12:35:00", "distance_m": 600.0},
-    {"id": "T-07", "type": "Kişi",      "conf": 0.90, "time": "12:36:00", "distance_m": 670.0},
-    {"id": "T-08", "type": "Araç",      "conf": 0.90, "time": "12:37:00", "distance_m": 740.0},
-    {"id": "T-09", "type": "Kutu",      "conf": 0.90, "time": "12:38:00", "distance_m": 810.0},
-    {"id": "T-10", "type": "Kişi",      "conf": 0.90, "time": "12:39:00", "distance_m": 850.0},
+    {"id": "T-01", "type": "Kutu",           "conf": 0.90, "time": "12:30:00", "distance_m": 200.0},
+    {"id": "T-02", "type": "Stop Tabelası",  "conf": 0.90, "time": "12:32:00", "distance_m": 280.0},
+    {"id": "T-03", "type": "Kutu",           "conf": 0.90, "time": "12:35:00", "distance_m": 440.0},
+    {"id": "T-04", "type": "Dama Paneli",    "conf": 0.90, "time": "12:36:00", "distance_m": 520.0},
+    {"id": "T-05", "type": "Kutu",           "conf": 0.90, "time": "12:37:00", "distance_m": 600.0},
+    {"id": "T-06", "type": "Kırmızı Kutu",   "conf": 0.90, "time": "12:38:00", "distance_m": 675.0},
+    {"id": "T-07", "type": "Kutu",           "conf": 0.90, "time": "12:39:00", "distance_m": 740.0},
+    {"id": "T-08", "type": "Stop Tabelası",  "conf": 0.90, "time": "12:40:00", "distance_m": 810.0},
+    {"id": "T-09", "type": "Mavi Kutu",      "conf": 0.90, "time": "12:41:00", "distance_m": 855.0},
 ]
 os.makedirs(ROS_LOG_DIR, exist_ok=True)
 # Alt-süreçler ve thread'ler bu env'i devralıp aynı build/ros klasörünü kullanır.
@@ -95,11 +83,10 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, 
     QFrame, QPlainTextEdit, QProgressBar, QFileDialog
 )
-from PySide6.QtWebEngineWidgets import QWebEngineView
-
-from styles import DARK_THEME_QSS, LEAFLET_MAP_HTML
-from interface import CompassWidget, CameraSimulatorWidget, TimelineWidget
-from threads import CameraStreamThread, TelemetryStreamThread, DetectionStreamThread, GeminiChatThread
+from styles import DARK_THEME_QSS
+from interface import CompassWidget, CameraSimulatorWidget, TimelineWidget, TacticalMapWidget
+from threads import (CameraStreamThread, TelemetryStreamThread, DetectionStreamThread,
+                     GeminiChatThread, McpClient, McpError)
 
 # ----------------------------------------------------------------------
 # LOGGING SETUP
@@ -218,6 +205,9 @@ class GroundControlStation(QMainWindow):
         self.gemini_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
         self.chat_thread = None          # aktif GeminiChatThread (tekil)
         self.chat_history_ctx = []       # Gemini konuşma bağlamı (role/parts)
+        # MCP araç sunucusu istemcisi: araçlar mcp_server.py alt sürecinde
+        # yaşar; ilk sorguda başlatılır (tembel) ve uygulama ömrünce paylaşılır.
+        self.mcp_client = None
         self.camera_thread = None
         # Aktif kamera akışı: başlangıçta ham alt kamera; YOLO başlayınca kutulu
         # /yolo/image_annotated akışına geçilir (switch_camera_source ile).
@@ -275,7 +265,7 @@ class GroundControlStation(QMainWindow):
         self.vlm_timer.timeout.connect(self.update_vlm_summary)
         self.vlm_timer.start(16000) # Update VLM explanation every 16 seconds
         
-        # Map setup is now handled dynamically once the QWebEngineView triggers loadFinished
+        # Harita kurulumu, TacticalMapWidget loadFinished sinyalini yayınlayınca yapılır
 
         # Pure simulation mode: otonom uçuş, ROS/MAVROS verisi hazır olunca
         # otomatik başlatılır (manuel buton kaldırıldı; video kaynağı satırında
@@ -583,7 +573,7 @@ class GroundControlStation(QMainWindow):
         tel_items_layout.addWidget(bat_widget)
         
         # Mode Card
-        self.lbl_mode = QLabel("UÇUŞ MODU: <span style='color:#f59e0b; font-weight:bold;'>GUIDED STRAIGHT</span>")
+        self.lbl_mode = QLabel("UÇUŞ MODU: <span style='color:#ef4444; font-weight:bold;'>DISCONNECTED</span>")
         self.lbl_mode.setStyleSheet("font-family: 'Roboto Mono'; font-size: 12px; background-color:#0d1522; padding:8px; border-radius:4px; border-left: 3px solid #f59e0b;")
         tel_items_layout.addWidget(self.lbl_mode)
         
@@ -631,7 +621,7 @@ class GroundControlStation(QMainWindow):
         map_title_layout = QHBoxLayout(map_title_bar)
         map_title_layout.setContentsMargins(10, 0, 10, 0)
         
-        map_title_lbl = QLabel("TAKTIKSEL TAKİP HARİTASI (LEAFLET)")
+        map_title_lbl = QLabel("TAKTIKSEL TAKİP HARİTASI")
         map_title_lbl.setProperty("class", "title-label")
         map_title_layout.addWidget(map_title_lbl)
         map_title_layout.addStretch()
@@ -643,28 +633,9 @@ class GroundControlStation(QMainWindow):
         
         map_panel_layout.addWidget(map_title_bar)
         
-        # WebEngine Map widget
-        if os.environ.get("QT_QPA_PLATFORM") == "offscreen":
-            # Headless map view mockup to prevent Skia/WebEngine rendering crashes and logs
-            class HeadlessMapView(QWidget):
-                loadFinished = Signal(bool)
-                class DummyPage:
-                    def runJavaScript(self, *args, **kwargs):
-                        pass
-                def __init__(self, parent=None):
-                    super().__init__(parent)
-                    self._page = self.DummyPage()
-                    # Trigger loadFinished(True) dynamically
-                    QTimer.singleShot(500, lambda: self.loadFinished.emit(True))
-                def page(self):
-                    return self._page
-                def setHtml(self, html):
-                    pass
-            self.map_view = HeadlessMapView()
-        else:
-            self.map_view = QWebEngineView()
-            self.map_view.setHtml(LEAFLET_MAP_HTML)
-            
+        # Yerli taktik harita widget'ı (WebEngine/Leaflet yerine; offscreen
+        # modda da sorunsuz çalıştığı için ayrı headless mock'a gerek yok).
+        self.map_view = TacticalMapWidget(START_LAT, START_LON)
         self.map_loaded = False
         self.map_view.loadFinished.connect(self.on_map_load_finished)
         map_panel_layout.addWidget(self.map_view)
@@ -779,9 +750,11 @@ class GroundControlStation(QMainWindow):
         self.chat_history.setHtml(
             "<div style='margin-bottom: 8px;'><b style='color:#10b981;'>SYSTEM COPILOT</b><br>"
             "Merhaba Operatör. Ben Gemini destekli canlı AI Copilot. Telemetri, batarya, YOLO tespitleri ve VLM sahne verilerine "
-            "gerçek zamanlı araçlarla (function calling) erişiyorum; hem anlık değerleri hem uçuş başından beri biriken geçmişi okuyabiliyorum.<br><br>"
+            "MCP (Model Context Protocol) araç sunucusu üzerinden erişiyorum; hem anlık değerleri hem uçuş başından beri biriken geçmişi okuyabiliyorum.<br><br>"
             "Aşağıdaki araç butonlarını kullanabilir (<b>Rapor Oluştur</b>, <b>Genel Özet</b>, <b>Telemetri</b>, <b>YoloE</b>) "
-            "veya serbest soru sorabilirsin.</div>"
+            "veya serbest soru sorabilirsin. Uçağı da yönlendirebilirim: "
+            "<i>\"sağa dön\"</i>, <i>\"100 metre ileri git\"</i>, <i>\"irtifayı 30 metreye çıkar\"</i> gibi "
+            "komutlar uçağa gerçek zamanlı iletilir (otonom rota izleme o anda devre dışı kalır).</div>"
         )
         
         chat_padding_widget = QWidget()
@@ -790,8 +763,10 @@ class GroundControlStation(QMainWindow):
         chat_padding_lyt.setSpacing(8)
         chat_padding_lyt.addWidget(self.chat_history)
         
-        # Araç (tool) kısayol butonları: her biri Gemini'yi ilgili araç kümesine
-        # zorlar (forced_tools), böylece buton kapsamı dışına çıkamaz.
+        # MCP araç kısayol butonları: her buton, MCP sunucusunda (mcp_server.py)
+        # yaşayan araçlardan ilgili kümeye Gemini'yi zorlar (forced_tools),
+        # böylece buton kapsamı dışına çıkamaz. Araç tanımları burada değil
+        # sunucuda durur; sorgu anında tools/list ile keşfedilir.
         pills_layout = QGridLayout()
         pills_layout.setSpacing(4)
 
@@ -839,11 +814,7 @@ class GroundControlStation(QMainWindow):
             self.add_terminal_log("Harita yüklenemedi!", "WARN")
 
     def setup_map_initial_waypoints(self):
-        # Convert waypoints list to JS arguments
-        wp_js = "[" + ",".join([f"{{lat:{wp['lat']},lon:{wp['lon']},name:'{wp['name']}'}}" for wp in self.waypoints]) + "]"
-        self.map_view.page().runJavaScript(f"setWaypoints({wp_js});")
-        
-        pass
+        self.map_view.set_waypoints(self.waypoints)
 
     def update_telemetry_loop(self):
         # 1. Update clock
@@ -881,6 +852,9 @@ class GroundControlStation(QMainWindow):
         else:
             self.bar_battery.setStyleSheet("QProgressBar { background-color: #030712; border-radius: 2px; } QProgressBar::chunk { background-color: #10b981; }")
             
+        mode_color = "#ef4444" if self.telemetry["mode"] == "DISCONNECTED" else "#f59e0b"
+        self.lbl_mode.setText(f"UÇUŞ MODU: <span style='color:{mode_color}; font-weight:bold;'>{self.telemetry['mode']}</span>")
+
         self.lbl_heading.setText(f"YÖNELİM: <span style='color:#06b6d4; font-weight:bold;'>{self.telemetry['heading']}° (Yaw)</span>")
         self.compass_widget.set_heading(self.telemetry["heading"])
         self.lbl_gps.setText(f"GPS KOORDİNAT:<br><span style='color:#f8fafc;'>LAT: {self.telemetry['lat']:.6f}<br>LON: {self.telemetry['lon']:.6f}</span>")
@@ -896,10 +870,11 @@ class GroundControlStation(QMainWindow):
         # Feed inputs to Camera HUD simulator widget
         self.camera_sim.set_telemetry(self.telemetry["lat"], self.telemetry["lon"], self.telemetry["heading"], self.telemetry["speed"])
         
-        # Update Leaflet Map UAV position marker via JavaScript injection
+        # Haritadaki İHA konum/iz işaretini güncelle
         if self.map_loaded:
-            self.map_view.page().runJavaScript(
-                f"updateUavPosition({self.telemetry['lat']}, {self.telemetry['lon']}, {self.telemetry['heading']}, '{self.telemetry['mode']}', {self.telemetry['alt']}, {self.telemetry['speed']});"
+            self.map_view.update_uav(
+                self.telemetry["lat"], self.telemetry["lon"], self.telemetry["heading"],
+                self.telemetry["mode"], self.telemetry["alt"], self.telemetry["speed"],
             )
 
     # ------------------------------------------------------------------
@@ -922,6 +897,11 @@ class GroundControlStation(QMainWindow):
                 tip_parts.append(f"Kategori: {det['category']}")
             if det.get("hits"):
                 tip_parts.append(f"{det['hits']} karede görüldü")
+            if det.get("qr_text"):
+                # QR metni çözülen kutu tabloda görünür işaret alır; metnin
+                # tamamı tooltip'te.
+                type_item.setText(f"{det['type']} [QR]")
+                tip_parts.append(f"QR: {det['qr_text']}")
             if tip_parts:
                 type_item.setToolTip(" • ".join(tip_parts))
 
@@ -969,12 +949,25 @@ class GroundControlStation(QMainWindow):
             "cargo box": "Kutu", "blue cargo box": "Kutu", "package": "Kutu",
             "car": "Araç", "truck": "Araç", "vehicle": "Araç",
             "pickup truck": "Araç", "van": "Araç",
+            "automobile": "Araç", "sedan": "Araç", "suv": "Araç",
+            "hatchback": "Araç", "semi-truck": "Araç", "tractor": "Araç",
             "human": "Kişi", "person": "Kişi", "pedestrian": "Kişi",
-            "drone": "Drone", "quadcopter": "Drone", "quadrotor": "Drone", "uav": "Drone",
+            # NOT: 'drone/uav' eşlemesi KASITLI kaldırıldı — rotadaki drone cismi
+            # otomobille değiştirildi, prompt'tan da çıkarıldı (bkz. yolo.py).
             "backpack": "Sırt Çantası", "rucksack": "Sırt Çantası",
             "knapsack": "Sırt Çantası",
+            "stop sign": "Stop Tabelası",
+            "checkerboard": "Dama Paneli", "chessboard": "Dama Paneli",
+            "concentric circles": "Nişan Tahtası", "target": "Nişan Tahtası",
+            "bullseye": "Nişan Tahtası",
             # normalize kategoriler
             "cargo_box": "Kutu",
+            "stop_sign": "Stop Tabelası",
+            "checker_panel": "Dama Paneli",
+            # İnsan aktörlerinin yerine konan renkli kutular: yolo.py bbox'ın
+            # baskın HSV rengine göre kategoriyi red_box/blue_box'a çevirir.
+            "red_box": "Kırmızı Kutu",
+            "blue_box": "Mavi Kutu",
         }
         return mapping.get(str(cls).lower(), str(cls))
 
@@ -1034,6 +1027,7 @@ class GroundControlStation(QMainWindow):
                 if conf > matched["conf"]:
                     matched["conf"] = conf
                     matched["type"] = type_tr
+                self._register_qr_text(matched, d.get("qr_text"))
                 changed = True
                 continue
 
@@ -1054,6 +1048,7 @@ class GroundControlStation(QMainWindow):
                 "hits": hits,
                 "_seen": now,
             }
+            self._register_qr_text(entry, d.get("qr_text"), announce=False)
             self.live_detections.append(entry)
             # Aynı nesne referansı geçmiş kaydına da girer: tablodan düşse bile
             # AI Copilot uçuş boyunca görülen hedefi raporlayabilir.
@@ -1073,26 +1068,46 @@ class GroundControlStation(QMainWindow):
             self.add_timeline_event("detection", f"YOLO tespiti: {type_tr} (%{int(conf*100)})")
             self.add_terminal_log(f"YOLO tespiti [{target_id}]: {type_tr} — güven %{int(conf*100)}", "INFO")
             if getattr(self, "map_loaded", False):
-                self.map_view.page().runJavaScript(
-                    f"addTarget('{target_id}', '{type_tr}', {lat}, {lon}, {conf});"
-                )
+                self.map_view.add_target(target_id, type_tr, lat, lon, conf)
+            if entry.get("qr_text"):
+                self._announce_qr_text(entry)
         if changed:
             self.update_detections_table()
             QTimer.singleShot(100, self.update_vlm_from_log)
+
+    def _register_qr_text(self, entry, qr_text, announce=True):
+        """yolo.py'nin kutudan çözdüğü QR metnini hedef kaydına işler. Hedef
+        başına bir kez duyurulur (terminal log + zaman çizelgesi + harita).
+        announce=False: kayıt henüz duyurulmaya hazır değil (yeni hedefin ID
+        logu önce gelsin), duyuruyu çağıran yapar."""
+        if not qr_text or entry.get("qr_text"):
+            return
+        entry["qr_text"] = qr_text
+        if announce:
+            self._announce_qr_text(entry)
+
+    def _announce_qr_text(self, entry):
+        qr_text = entry.get("qr_text", "")
+        self.add_terminal_log(
+            f"QR metni okundu [{entry['id']}]: \"{qr_text}\"", "INFO"
+        )
+        self.add_timeline_event("detection", f"QR okundu: {qr_text}")
+        if getattr(self, "map_loaded", False):
+            self.map_view.set_target_qr_text(entry["id"], qr_text)
 
     def handle_table_row_click(self, item):
         row = item.row()
         if row >= len(self.live_detections):
             return
         det = self.live_detections[row]
-        # Center Leaflet Map on selected target coordinates
+        # Haritayı seçilen hedefin koordinatına kilitle
         if self.map_loaded:
-            self.map_view.page().runJavaScript(f"map.setView([{det['lat']}, {det['lon']}], 18);")
+            self.map_view.center_on(det["lat"], det["lon"])
         self.add_terminal_log(f"Harita {det['id']} koordinatına odaklandı ({det['lat']:.5f}, {det['lon']:.5f}).", "NAV")
 
     def center_map_on_uav(self):
         if self.map_loaded:
-            self.map_view.page().runJavaScript(f"map.setView([{self.telemetry['lat']}, {self.telemetry['lon']}], 16);")
+            self.map_view.center_on_uav()
         self.add_terminal_log("Harita İHA anlık konumuna merkezlendi.", "NAV")
 
     # ------------------------------------------------------------------
@@ -1198,8 +1213,10 @@ class GroundControlStation(QMainWindow):
     # ------------------------------------------------------------------
     # AI COPILOT CHAT ENGINE
     # ------------------------------------------------------------------
-    # Sohbet kutusunun üstündeki 4 araç kısayolu:
-    #   (buton etiketi, tooltip, Gemini'ye gidecek sorgu, izin verilen araçlar).
+    # Sohbet kutusunun üstündeki 4 araç kısayolu — MCP mimarisi:
+    #   (buton etiketi, tooltip, Gemini'ye gidecek sorgu, izin verilen MCP araçları).
+    # Araç adları mcp_server.py'deki tools/list kayıtlarıyla birebir eşleşir;
+    # tanım/şema/yürütme sunucudadır, buton yalnızca ad listesiyle kapsam kilitler.
     # 'forced_tools' listesi Gemini'nin function-calling'ini o araçlara kilitler;
     # böylece "Telemetri" butonu YOLO verisine, "YoloE" butonu telemetriye kaymaz.
     COPILOT_TOOL_BUTTONS = [
@@ -1253,22 +1270,28 @@ class GroundControlStation(QMainWindow):
             )
             return
 
-        # 2. "Yazıyor..." göstergesi.
+        # 2. MCP araç sunucusunun ayakta olduğundan emin ol (ilk sorguda
+        # başlatılır; süreç öldüyse yeniden başlatılır).
+        if not self._ensure_mcp_client():
+            return
+
+        # 3. "Yazıyor..." göstergesi.
         self.chat_history.append(
             "<div id='copilot-typing' style='margin-bottom: 8px; color:#64748b;'>"
             "<i>AI Copilot düşünüyor…</i></div>"
         )
         self._scroll_chat_bottom()
 
-        # 3. UI thread'inden anlık veri snapshot'ı al (thread-güvenli okuma için).
+        # 4. UI thread'inden anlık veri snapshot'ı al (thread-güvenli okuma için).
         snapshot = self._build_copilot_snapshot()
 
-        # 4. Gemini thread'ini başlat.
+        # 5. Gemini thread'ini başlat (araçlara MCP istemcisi üzerinden erişir).
         self.chat_thread = GeminiChatThread(
             api_key=self.gemini_api_key,
             history=self.chat_history_ctx,
             user_query=query,
             snapshot=snapshot,
+            mcp_client=self.mcp_client,
             forced_tools=forced_tools,
         )
         self._pending_query = query
@@ -1277,6 +1300,30 @@ class GroundControlStation(QMainWindow):
         self.chat_thread.action_requested.connect(self._on_copilot_action)
         self.chat_thread.log_signal.connect(self.add_terminal_log)
         self.chat_thread.start()
+
+    def _ensure_mcp_client(self):
+        """MCP araç sunucusunu (mcp_server.py alt süreci) hazır eder. İlk
+        sorguda başlatılır; süreç öldüyse yeniden başlatılır. Başlatılamazsa
+        sohbete hata düşer ve False döner — araçsız Gemini veri uyduracağı
+        için sorgu araçsız sürdürülmez."""
+        if self.mcp_client is not None and self.mcp_client.is_alive():
+            return True
+        try:
+            self.mcp_client = McpClient()
+            info = self.mcp_client.start()
+            self.add_terminal_log(
+                f"MCP araç sunucusu başlatıldı: {info.get('name', '?')} "
+                f"v{info.get('version', '?')} (stdio).", "INFO"
+            )
+            return True
+        except (McpError, OSError) as exc:
+            self.mcp_client = None
+            self.add_terminal_log(f"MCP araç sunucusu başlatılamadı: {exc}", "WARN")
+            self._append_copilot_html(
+                "<span style='color:#ef4444;'>MCP araç sunucusu başlatılamadı.</span><br>"
+                f"Ayrıntı: {exc}"
+            )
+            return False
 
     # AI Copilot'un "şu an aktif hedef" saydığı süre (saniye): bu pencerede
     # tekrar görülmemiş tespitler yalnızca geçmişte kalır.
@@ -1303,6 +1350,10 @@ class GroundControlStation(QMainWindow):
             "detection_log": [dict(d) for d in self.detection_log],
             "vlm_summary": vlm_text,
             "mission_time_s": now - self.mission_start_ts,
+            # Görev başlangıç (kalkış/home) noktası: return_to_start MCP aracı
+            # bunu hedef alır. SITL uçağı her koşuda bu sabit konumda doğar
+            # (siha_control home'u ilk GPS kilidinden alır, aynı noktadır).
+            "home": {"lat": START_LAT, "lon": START_LON},
         }
 
     def _remove_typing_indicator(self):
@@ -1399,6 +1450,12 @@ class GroundControlStation(QMainWindow):
         if action == "download_report":
             self.download_tactic_report()
             self.add_timeline_event("command", "AI: Taktik Raporu Derlendi")
+        elif action == "timeline_event":
+            # MCP uçuş komutları (turn_heading/fly_forward/change_altitude)
+            # gönderildiğinde zaman çizelgesine ve terminale iz düşülür.
+            label = payload.get("label", "AI Uçuş Komutu")
+            self.add_timeline_event("command", label)
+            self.add_terminal_log(label, "INFO")
 
     def download_tactic_report(self):
         report_content = (
@@ -1428,10 +1485,11 @@ class GroundControlStation(QMainWindow):
 
         report_content += "Target Detection Logs (YOLO — uçuş başından bu yana):\n"
         for d in self.detection_log:
+            qr_part = f" | QR: \"{d['qr_text']}\"" if d.get("qr_text") else ""
             report_content += (
                 f"- ID: {d['id']} | Nesne: {d['type']} | Tepe Güven: %{int(d['conf']*100)} "
                 f"| İlk: {d.get('first_time', '?')} | Son: {d['time']} "
-                f"| GPS: {d['lat']:.5f}, {d['lon']:.5f}\n"
+                f"| GPS: {d['lat']:.5f}, {d['lon']:.5f}{qr_part}\n"
             )
         if not self.detection_log:
             report_content += "- (Tespit kaydedilmedi)\n"
@@ -1572,6 +1630,10 @@ class GroundControlStation(QMainWindow):
         # Kamera yayınını durdur
         if hasattr(self, "camera_thread") and self.camera_thread is not None:
             self.camera_thread.stop()
+
+        # MCP araç sunucusunu durdur
+        if getattr(self, "mcp_client", None) is not None:
+            self.mcp_client.stop()
     
 
         if hasattr(self, "otonom_flight_process") and self.otonom_flight_process is not None:

@@ -1,23 +1,33 @@
-"""Gemini tabanlı canlı (tool çağıran) AI Copilot thread'i.
+"""Gemini tabanlı canlı (tool çağıran) AI Copilot thread'i — MCP mimarisi.
 
-Kural-bazlı yanıt motorunun yerine geçer. Operatör sorgusunu Google Gemini
-'generateContent' REST uç noktasına gönderir; Gemini gerektiğinde tanımlı
-araçları (function calling) çağırır. Araçlar UI thread'inden alınan bir
-telemetri/tespit "snapshot"'ı üzerinde çalışır — böylece bu thread UI'ya
-dokunmadan (bloklamadan) veri okuyabilir. Rapor indirme gibi UI eylemi
-gerektiren araçlar ana thread'e sinyalle iletilir.
+Operatör sorgusunu Google Gemini 'generateContent' REST uç noktasına gönderir;
+Gemini gerektiğinde araç (function calling) çağırır. Araçlar artık bu dosyada
+TANIMLI DEĞİLDİR: bağımsız bir MCP sunucusunda (mcp_server.py) yaşarlar ve
+çalışma anında keşfedilir. Akış şöyledir:
+
+  1. McpClient'tan tools/list ile araç tanımları alınır ve Gemini
+     function_declarations biçimine çevrilir (şema tek yerde: sunucuda).
+  2. UI thread'inden alınan telemetri/tespit snapshot'ı sorgudan önce
+     notifications/snapshot ile sunucuya itilir (sunucu ayrı süreçtir,
+     GUI belleğini göremez).
+  3. Gemini'nin her functionCall'u tools/call'a çevrilir; sonuç
+     functionResponse olarak modele döner.
+  4. Sunucu 'ui_action' işareti döndürürse (ör. rapor kaydetme penceresi)
+     eylem ana thread'e sinyalle iletilir — GUI eylemleri sunucuda değil
+     burada, host tarafında yürütülür.
 
 Ağ çağrısı stdlib urllib ile yapılır; ekstra bağımlılık yoktur.
 """
 
 import os
-import math
 import time
 import json
 import urllib.request
 import urllib.error
 
 from PySide6.QtCore import QThread, Signal
+
+from .mcp_client import McpError
 
 GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta"
 
@@ -48,71 +58,61 @@ SYSTEM_PROMPT = (
     "'Anlık' sorular için get_telemetry / get_detections, 'geçmiş, trend, şu ana "
     "kadar' soruları için get_telemetry_history / get_detection_history, birleşik "
     "durum değerlendirmesi için get_situation_summary, rapor derlemesi için "
-    "generate_tactical_report araçlarını kullan. Araç sonucu boşsa (veri yoksa) "
-    "bunu açıkça söyle, uydurma. Yanıtlarında sade Markdown kullanabilirsin "
-    "(kalın için **...**)."
+    "generate_tactical_report araçlarını kullan. "
+    "UÇUŞ KOMUTLARI: Operatör uçağı yönlendirmek isterse (örn. 'sağa dön', "
+    "'sola dön', '100 metre ileri git', 'irtifayı 30 metreye çıkar', '5 metre "
+    "alçal') ilgili aracı çağır: dönüş için turn_heading (sağa=pozitif derece, "
+    "sola=negatif; sadece 'sağa dön' denirse 90 kullan), ileri gitmek için "
+    "fly_forward, irtifa için change_altitude; 'başlangıç noktasına dön / kalkış "
+    "noktasına dön / başa dön / eve dön' için return_to_start (turn_heading ile "
+    "taklit etme, 180° dönüş başlangıca götürmez); 'rotaya devam et / otonom rotayı "
+    "izle / otonom moda dön' için resume_route — uçuş komutları için yetkin TAM, "
+    "asla 'yetkim yok' deme. Komut aracının döndürdüğü status "
+    "metnindeki gerçekleşen değerleri (yeni yön, mesafe, irtifa, güvenlik "
+    "sıkıştırması) operatöre kısaca aktar; aracı çağırmadan komutu 'gönderdim' "
+    "deme. Araç sonucu boşsa (veri yoksa) bunu açıkça söyle, uydurma. "
+    "Yanıtlarında sade Markdown kullanabilirsin (kalın için **...**)."
 )
 
-# Gemini'ye bildirilen araç (fonksiyon) tanımları — OpenAPI şema alt kümesi.
-TOOL_DECLARATIONS = [
-    {
-        "name": "get_telemetry",
-        "description": "SİHA'nın ANLIK telemetrisini döndürür: irtifa (m), hız (m/s), "
-                       "otopilot modu, enlem/boylam, yön (heading) ve uydu sayısı.",
-    },
-    {
-        "name": "get_telemetry_history",
-        "description": "Uçuş başından bu yana kaydedilen GEÇMİŞ telemetriyi özetler: irtifa/hız/"
-                       "batarya için min-maks-ortalama, batarya tüketim hızı, kat edilen mesafe, "
-                       "otopilot mod değişimleri ve zaman serisinden örnek noktalar.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "window_seconds": {
-                    "type": "number",
-                    "description": "Geriye dönük incelenecek süre (saniye). Verilmezse tüm "
-                                   "kayıtlı geçmiş kullanılır.",
-                },
-            },
-        },
-    },
-    {
-        "name": "get_battery_status",
-        "description": "Batarya seviyesi (%), voltaj (V) ve durum değerlendirmesini döndürür.",
-    },
-    {
-        "name": "get_detections",
-        "description": "YOLO'nun ŞU AN aktif (son saniyelerde görülen) hedeflerini ve canlı tespit "
-                       "tablosunu döndürür: tür bazında adet (Araç, Kişi, Kutu vb.), toplam ve "
-                       "son tespit koordinatı.",
-    },
-    {
-        "name": "get_detection_history",
-        "description": "Uçuş başından bu yana YOLO'nun tespit ettiği TÜM benzersiz hedeflerin "
-                       "geçmişini döndürür: her hedef için tür, tepe güven skoru, ilk/son görülme "
-                       "zamanı, kaç karede doğrulandığı ve GPS koordinatı; ayrıca tür bazında "
-                       "toplamlar ve ilk görülme sırası (kronoloji).",
-    },
-    {
-        "name": "get_vlm_scene",
-        "description": "Görüntü-Dil Modeli (VLM) tarafından üretilen anlık sahne açıklamasını döndürür.",
-    },
-    {
-        "name": "get_situation_summary",
-        "description": "Genel durum özeti için tek çağrıda hem telemetrinin (anlık + geçmiş trend) "
-                       "hem de YOLO tespitlerinin (aktif + geçmiş) birleşik verisini ve VLM sahne "
-                       "açıklamasını döndürür.",
-    },
-    {
-        "name": "generate_tactical_report",
-        "description": "Mevcut telemetri, tespit ve VLM verilerini birleştirip taktik rapor "
-                       "dosyası oluşturur ve operatörün ekranında kaydetme penceresi açar.",
-    },
-]
+# Gemini'nin function-declaration şemasında tanıdığı JSON Schema alanları;
+# MCP inputSchema'sından bunlar dışındaki alanlar (ör. $schema) süzülür.
+_GEMINI_SCHEMA_KEYS = {"type", "description", "properties", "required",
+                       "items", "enum", "nullable"}
+
+
+def _sanitize_schema(schema):
+    """MCP inputSchema'sını Gemini'nin kabul ettiği alt kümeye indirger."""
+    if not isinstance(schema, dict):
+        return schema
+    out = {}
+    for key, val in schema.items():
+        if key not in _GEMINI_SCHEMA_KEYS:
+            continue
+        if key == "properties" and isinstance(val, dict):
+            out[key] = {k: _sanitize_schema(v) for k, v in val.items()}
+        elif key == "items":
+            out[key] = _sanitize_schema(val)
+        else:
+            out[key] = val
+    return out
+
+
+def mcp_tools_to_gemini(tools):
+    """MCP tools/list çıktısını Gemini function_declarations listesine çevirir.
+    Parametresiz araçlarda 'parameters' alanı hiç konmaz (Gemini boş nesne
+    şemasını sevmez; eski elle yazılmış tanımlar da aynı kuralı izliyordu)."""
+    decls = []
+    for t in tools:
+        decl = {"name": t["name"], "description": t.get("description", "")}
+        schema = t.get("inputSchema") or {}
+        if schema.get("properties"):
+            decl["parameters"] = _sanitize_schema(schema)
+        decls.append(decl)
+    return decls
 
 
 class GeminiChatThread(QThread):
-    """Tek bir operatör sorgusunu Gemini ile (araç çağırma döngüsü dahil) işler."""
+    """Tek bir operatör sorgusunu Gemini ile (MCP araç döngüsü dahil) işler."""
 
     response_ready = Signal(str)          # nihai asistan metni (Markdown)
     error_occurred = Signal(str)          # hata mesajı
@@ -121,7 +121,7 @@ class GeminiChatThread(QThread):
 
     MAX_TOOL_ROUNDS = 5
 
-    def __init__(self, api_key, history, user_query, snapshot,
+    def __init__(self, api_key, history, user_query, snapshot, mcp_client,
                  forced_tools=None, model=DEFAULT_MODEL, parent=None):
         super().__init__(parent)
         self.api_key = api_key
@@ -129,6 +129,7 @@ class GeminiChatThread(QThread):
         self.history = list(history) if history else []
         self.user_query = user_query
         self.snapshot = snapshot or {}
+        self.mcp_client = mcp_client
         self.model = model
         # Birincil + yedek modeller; ilk çalışan modele kilitlenip döngü boyunca
         # onu kullanırız (self._model_idx).
@@ -143,205 +144,37 @@ class GeminiChatThread(QThread):
         self._report_triggered = False
 
     # ------------------------------------------------------------------
-    # ARAÇ YARDIMCILARI
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _haversine_m(lat1, lon1, lat2, lon2):
-        """İki koordinat arasındaki yaklaşık yer mesafesi (metre)."""
-        r = 6371000.0
-        p1, p2 = math.radians(lat1), math.radians(lat2)
-        dp = math.radians(lat2 - lat1)
-        dl = math.radians(lon2 - lon1)
-        a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
-        return 2 * r * math.asin(math.sqrt(a))
-
-    @staticmethod
-    def _minmaxavg(values):
-        if not values:
-            return None
-        return {
-            "min": round(min(values), 2),
-            "max": round(max(values), 2),
-            "avg": round(sum(values) / len(values), 2),
-        }
-
-    def _telemetry_now(self):
-        tel = self.snapshot.get("telemetry", {})
-        batt = tel.get("battery", 0)
-        return {
-            "altitude_m": round(tel.get("alt", 0.0), 2),
-            "speed_ms": round(tel.get("speed", 0.0), 2),
-            "mode": tel.get("mode", "?"),
-            "lat": round(tel.get("lat", 0.0), 6),
-            "lon": round(tel.get("lon", 0.0), 6),
-            "heading_deg": tel.get("heading", 0),
-            "satellites": tel.get("sats", 0),
-            "battery_percent": int(batt),
-            "voltage_v": tel.get("voltage", 0.0),
-        }
-
-    def _telemetry_history(self, window_seconds=None):
-        """Kayıtlı telemetri örneklerinden trend/istatistik çıkarır."""
-        samples = self.snapshot.get("telemetry_history", [])
-        if not samples:
-            return {"sample_count": 0,
-                    "note": "Henüz telemetri geçmişi birikmedi (uçuş yeni başlamış olabilir)."}
-
-        if window_seconds:
-            cutoff = samples[-1]["t"] - float(window_seconds)
-            windowed = [s for s in samples if s["t"] >= cutoff] or samples[-1:]
-        else:
-            windowed = samples
-
-        alts = [s["alt"] for s in windowed]
-        speeds = [s["speed"] for s in windowed]
-        batts = [s["battery"] for s in windowed]
-
-        # Mod değişimleri (kronolojik).
-        mode_changes = []
-        prev = None
-        for s in windowed:
-            if s["mode"] != prev:
-                mode_changes.append({"time": s["time"], "mode": s["mode"]})
-                prev = s["mode"]
-
-        # Kat edilen yer mesafesi (ardışık örnekler arası toplam).
-        distance = 0.0
-        for a, b in zip(windowed, windowed[1:]):
-            distance += self._haversine_m(a["lat"], a["lon"], b["lat"], b["lon"])
-
-        span_s = max(0.0, windowed[-1]["t"] - windowed[0]["t"])
-        batt_drop = batts[0] - batts[-1] if batts else 0.0
-        drain_rate = round(batt_drop / (span_s / 60.0), 2) if span_s >= 30 else None
-
-        # Zaman serisini modele taşımak için ~10 eşit aralıklı örneğe indir.
-        step = max(1, len(windowed) // 10)
-        trail = [
-            {"time": s["time"], "alt_m": round(s["alt"], 1), "speed_ms": round(s["speed"], 1),
-             "battery_percent": int(s["battery"]), "mode": s["mode"],
-             "lat": round(s["lat"], 5), "lon": round(s["lon"], 5)}
-            for s in windowed[::step]
-        ][-10:]
-
-        return {
-            "window_seconds": round(span_s, 1),
-            "sample_count": len(windowed),
-            "altitude_m": self._minmaxavg(alts),
-            "speed_ms": self._minmaxavg(speeds),
-            "battery_percent": {"start": int(batts[0]), "current": int(batts[-1]),
-                                "drop": round(batt_drop, 1)},
-            "battery_drain_per_min": drain_rate,
-            "distance_traveled_m": round(distance, 1),
-            "mode_changes": mode_changes,
-            "samples": trail,
-        }
-
-    @staticmethod
-    def _det_row(d):
-        return {
-            "id": d.get("id"),
-            "type": d.get("type"),
-            "peak_conf": round(d.get("conf", 0.0), 2),
-            "first_seen": d.get("first_time"),
-            "last_seen": d.get("time"),
-            "frames_confirmed": d.get("hits", 1),
-            "lat": round(d.get("lat", 0.0), 5),
-            "lon": round(d.get("lon", 0.0), 5),
-            "alt_m": round(d["alt"], 1) if d.get("alt") is not None else None,
-        }
-
-    def _detections_live(self):
-        dets = self.snapshot.get("detections", [])
-        active = self.snapshot.get("active_detections", [])
-        counts = {}
-        for d in dets:
-            counts[d.get("type", "?")] = counts.get(d.get("type", "?"), 0) + 1
-        return {
-            "active_now": [self._det_row(d) for d in active],
-            "active_count": len(active),
-            "table_total": len(dets),
-            "counts_by_type": counts,
-            "last_detection": self._det_row(dets[-1]) if dets else None,
-            "targets": [self._det_row(d) for d in dets[-10:]],
-        }
-
-    def _detections_history(self):
-        log = self.snapshot.get("detection_log", [])
-        if not log:
-            return {"total_unique_targets": 0,
-                    "note": "Uçuş başından bu yana YOLO henüz hedef tespit etmedi."}
-        counts = {}
-        for d in log:
-            counts[d.get("type", "?")] = counts.get(d.get("type", "?"), 0) + 1
-        confs = [d.get("conf", 0.0) for d in log]
-        return {
-            "total_unique_targets": len(log),
-            "counts_by_type": counts,
-            "confidence": self._minmaxavg(confs),
-            "first_detection_time": log[0].get("first_time"),
-            "last_detection_time": log[-1].get("time"),
-            # Kronolojik (ilk görülme sırasına göre) tüm hedefler.
-            "targets": [self._det_row(d) for d in log],
-        }
-
-    # ------------------------------------------------------------------
-    # ARAÇ YÜRÜTÜCÜ (snapshot üzerinde, thread-güvenli okuma)
+    # ARAÇ YÜRÜTÜCÜ (MCP tools/call köprüsü)
     # ------------------------------------------------------------------
     def _execute_tool(self, name, args):
-        tel = self.snapshot.get("telemetry", {})
-        vlm = self.snapshot.get("vlm_summary", "")
+        """Gemini'nin functionCall'unu MCP sunucusuna iletir; 'ui_action'
+        işaretini host tarafında (sinyalle) yürütüp modele durum döndürür."""
+        try:
+            result = self.mcp_client.call_tool(name, args)
+        except McpError as exc:
+            return {"error": f"MCP aracı çalıştırılamadı: {exc}"}
 
-        if name == "get_telemetry":
-            return self._telemetry_now()
+        ui_action = None
+        ui_payload = {}
+        if isinstance(result, dict):
+            ui_action = result.pop("ui_action", None)
+            ui_payload = result.pop("ui_payload", {}) or {}
 
-        if name == "get_telemetry_history":
-            return self._telemetry_history(args.get("window_seconds"))
-
-        if name == "get_battery_status":
-            batt = tel.get("battery", 0)
-            return {
-                "battery_percent": int(batt),
-                "voltage_v": tel.get("voltage", 0.0),
-                "assessment": "kritik" if batt < 20 else ("düşük" if batt < 40 else "normal"),
-            }
-
-        if name == "get_detections":
-            return self._detections_live()
-
-        if name == "get_detection_history":
-            return self._detections_history()
-
-        if name == "get_vlm_scene":
-            return {"scene_description": vlm or "Henüz sahne açıklaması üretilmedi."}
-
-        if name == "get_situation_summary":
-            return {
-                "mission_time_s": round(self.snapshot.get("mission_time_s", 0.0), 1),
-                "telemetry_now": self._telemetry_now(),
-                "telemetry_history": self._telemetry_history(),
-                "detections_live": self._detections_live(),
-                "detections_history": self._detections_history(),
-                "vlm_scene": vlm or "Henüz sahne açıklaması üretilmedi.",
-            }
-
-        if name == "generate_tactical_report":
+        if ui_action == "download_report":
             if self._report_triggered:
                 # Aynı sorguda ikinci kez istendi: pencereyi tekrar açma, modele
                 # işin bittiğini söyle ki özet metnine geçsin.
-                return {"status": "Rapor bu sorguda zaten derlendi ve kaydetme penceresi "
-                                  "açıldı; tekrar çağırma, sonucu operatöre özetle."}
+                return {"status": "Rapor bu sorguda zaten derlendi ve kaydetme "
+                                  "penceresi açıldı; tekrar çağırma, sonucu "
+                                  "operatöre özetle."}
             self._report_triggered = True
             # UI eylemi — ana thread'de çalıştırılmak üzere sinyalle bildir.
-            self.action_requested.emit("download_report", {})
-            return {"status": "Rapor derleyici tetiklendi; kaydetme penceresi açılıyor.",
-                    "report_contents": {
-                        "telemetry_now": self._telemetry_now(),
-                        "telemetry_history": self._telemetry_history(),
-                        "detections_history": self._detections_history(),
-                        "vlm_scene": vlm or "Henüz sahne açıklaması üretilmedi.",
-                    }}
-
-        return {"error": f"Bilinmeyen araç: {name}"}
+            self.action_requested.emit("download_report", ui_payload)
+        elif ui_action:
+            # Diğer UI eylemleri (ör. uçuş komutlarının timeline_event kaydı)
+            # ana thread'e olduğu gibi iletilir; app.py eşleştirir.
+            self.action_requested.emit(ui_action, ui_payload)
+        return result
 
     # ------------------------------------------------------------------
     # HTTP
@@ -404,12 +237,26 @@ class GeminiChatThread(QThread):
             )
             return
 
+        # MCP hazırlığı: araç tanımlarını sunucudan keşfet ve güncel snapshot'ı
+        # sunucuya it. Sunucu yoksa/öldüyse sorgu araçsız değil, hatayla biter —
+        # araçsız Gemini sayısal veri uydurabilir, buna izin vermeyiz.
+        try:
+            mcp_tools = self.mcp_client.list_tools()
+            self.mcp_client.update_snapshot(self.snapshot)
+        except McpError as exc:
+            self.error_occurred.emit(f"MCP araç sunucusuna ulaşılamadı: {exc}")
+            return
+        tool_declarations = mcp_tools_to_gemini(mcp_tools)
+        self.log_signal.emit(
+            f"AI Copilot: MCP sunucusundan {len(tool_declarations)} araç keşfedildi.", "DEBUG"
+        )
+
         contents = list(self.history)
         contents.append({"role": "user", "parts": [{"text": self.user_query}]})
 
         base_payload = {
             "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-            "tools": [{"function_declarations": TOOL_DECLARATIONS}],
+            "tools": [{"function_declarations": tool_declarations}],
             # gemini-3/2.5 "düşünen" modeller çıktı bütçesinin bir kısmını iç
             # düşünmeye harcar; görünür yanıtın kesilmemesi için başlık yüksek.
             "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048},
@@ -450,7 +297,7 @@ class GeminiChatThread(QThread):
                     for fc in function_calls:
                         fname = fc.get("name", "")
                         fargs = fc.get("args", {}) or {}
-                        self.log_signal.emit(f"AI Copilot aracı çağırdı: {fname}", "DEBUG")
+                        self.log_signal.emit(f"AI Copilot MCP aracı çağırdı: {fname}", "DEBUG")
                         tool_result = self._execute_tool(fname, fargs)
                         response_parts.append({
                             "functionResponse": {
