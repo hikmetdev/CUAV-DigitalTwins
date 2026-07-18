@@ -74,15 +74,50 @@ YOLO_MAX_BBOX_FRAC = float(os.environ.get("YOLO_MAX_BBOX_FRAC", "0.40"))
 # NMS IoU eşiği (çakışan kutuları birleştirir). claude2.md 0.50 önerdi; küçük/bitişik
 # cisimlerin ayrı kalması için ortam değişkeniyle ayarlanabilir tutulur.
 YOLO_IOU_THRESHOLD = float(os.environ.get("YOLO_IOU_THRESHOLD", "0.50"))
+# Kamera yatay görüş açısı (radyan). mini_talon_vtail bottom_camera: 80°, nadir
+# (pitch 90 => tam aşağı) bakar. Fiziksel boyut kapısının ölçek hesabı buna dayanır.
+YOLO_CAM_HFOV = float(os.environ.get("YOLO_CAM_HFOV", "1.3962634"))
+# Fiziksel boyut kapısı: nadir kamerada irtifa + FOV bilindiği için bir bbox'ın
+# YERDE kaç metre ettiği hesaplanabilir (bkz. px_per_m). Rotadaki en küçük cisim
+# ~3.2 m (sırt çantası), en büyüğü ~6.5 m (traktör); ölçeklenmiş insan aktörüne
+# pay bırakıp üst sınır 9 m. Bu aralığın dışı fiziksel olarak hedef OLAMAZ:
+# alt sınırın altı = pist boyası/QR deseni detayı, üstü = zemin/gölge yaması.
+# YOLO_MAX_BBOX_FRAC'tan çok daha keskin: 15 m'de %40 kare hâlâ ~12 m'lik bir
+# kutuya izin verirken (build_20260717_103118 frame 95: box:0.40 = 8.8x11.5 m
+# sahte pozitif geçmişti) bu kapı onu eler.
+YOLO_MIN_OBJ_M = float(os.environ.get("YOLO_MIN_OBJ_M", "1.2"))
+YOLO_MAX_OBJ_M = float(os.environ.get("YOLO_MAX_OBJ_M", "9.0"))
+# İnsana özel alt sınır: tepeden bakışta bir insanın ayak izi GERÇEKTEN küçük.
+# Ölçüldü (2026-07-17, rotadaki aktörler): 15 m'de bbox ~30-31 px = 1.16-1.23 m,
+# yani genel 1.2 m tabanının tam üstünde/altında — aktör pozuna göre rastgele
+# elenip elenmemesi anlamına geliyordu. person_conf_min ile aynı mantık: insan
+# kendi eşiğini alır. 0.4 m (~10 px) doku gürültüsünü hâlâ eler ama insanı tutar.
+YOLO_MIN_OBJ_M_PERSON = float(os.environ.get("YOLO_MIN_OBJ_M_PERSON", "0.4"))
+# Ego (kendi gölgesi) bastırma parametreleri — bkz. EgoStaticZones.
+YOLO_EGO_FILTER = os.environ.get("YOLO_EGO_FILTER", "1") == "1"
+YOLO_EGO_RADIUS_PX = float(os.environ.get("YOLO_EGO_RADIUS_PX", "40"))
+YOLO_EGO_MIN_HITS = int(os.environ.get("YOLO_EGO_MIN_HITS", "6"))
+YOLO_EGO_MIN_TRAVEL_M = float(os.environ.get("YOLO_EGO_MIN_TRAVEL_M", "40"))
+YOLO_EGO_TTL_S = float(os.environ.get("YOLO_EGO_TTL_S", "20"))
+# Ego kanıtının KESİNTİSİZ olması için izin verilen en büyük boşluk (sn).
+# Gölge pratikte her karede görünür; bu süreden uzun süre kaybolup geri gelen bir
+# kutu aynı cisim sayılmaz, kanıt sayacı sıfırlanır. Bu kural olmadan rotadaki
+# ARDIŞIK cisimler aynı piksel izinden geçtikçe bir bölgeyi yanlışlıkla "sabit"
+# gibi gösterip onaylatabiliyor (bkz. test_safety: gerçek cisim bastırılıyordu).
+YOLO_EGO_MAX_GAP_S = float(os.environ.get("YOLO_EGO_MAX_GAP_S", "1.5"))
+# İç içe kutu bastırma: aynı kategoriden büyük bir kutunun içinde kalan küçük
+# kutu (QR deseni/pist rakamı içindeki alt kareler) atılır.
+YOLO_NESTED_FILTER = os.environ.get("YOLO_NESTED_FILTER", "1") == "1"
 # Görüntü ön işleme modu: none | clahe | gamma | sharpen | clahe_gamma.
 # Geriye dönük uyumluluk: eski YOLO_CLAHE=1 varsayılanını korumak için varsayılan
 # "clahe". YOLO_PREPROCESS açıkça verilirse o kazanır.
 YOLO_PREPROCESS = os.environ.get("YOLO_PREPROCESS", "clahe").lower()
 YOLO_GAMMA = float(os.environ.get("YOLO_GAMMA", "1.2"))
-# Tiling (multi-scale): tam kare az/hiç tespit verirse kareyi NxN parçaya bölüp
-# her parçada ayrı çıkarım yapar; küçük/uzak cisimlerde recall'ı artırır. CPU/VRAM
-# maliyeti grid^2 katına çıktığı için (8GB RAM/GTX1650'de OOM riski) varsayılan KAPALI.
-YOLO_ENABLE_TILING = os.environ.get("YOLO_ENABLE_TILING", "0") == "1"
+# Tiling: GPU varsa veya kullanıcı açıkça YOLO_ENABLE_TILING=1 verdiyse açık,
+# CPU'da 4 ekstra çıkarım kare hızını ~0.5 FPS'e düşürüp video akışını dondurduğu
+# için CPU ortamında varsayılan kapalı ("0").
+default_tiling = "1" if torch.cuda.is_available() else "0"
+YOLO_ENABLE_TILING = os.environ.get("YOLO_ENABLE_TILING", default_tiling) == "1"
 YOLO_TILE_GRID = max(1, int(os.environ.get("YOLO_TILE_GRID", "2")))
 # Tam karede tespit sayısı bunun altındaysa tiling devreye girer.
 YOLO_TILE_MIN_DETS = int(os.environ.get("YOLO_TILE_MIN_DETS", "1"))
@@ -90,6 +125,25 @@ YOLO_TILE_MIN_DETS = int(os.environ.get("YOLO_TILE_MIN_DETS", "1"))
 # geçmez (tek karelik sahte pozitifleri eler). Varsayılan 1 = mevcut davranış
 # (bastırma yok); bu ortamda sorun kaçırılan tespitler olduğu için düşük tutulur.
 YOLO_MIN_HITS = max(1, int(os.environ.get("YOLO_MIN_HITS", "1")))
+# QR çözme: cargo_box tespitlerinin bbox'ı kırpılıp büyütülür ve içindeki QR
+# kodun METNİ okunur (cv2.QRCodeDetector; ek bağımlılık yok). Rotadaki QR
+# kutular models/textures/make_qr_text_textures.py ile üretilen metinli QR
+# taşır. Ölçüm: 15 m irtifada 3 m kutu ~84 px görünür; 4x cubic büyütme sonrası
+# çözüm güvenilir (60 px'e kadar çalıştı). Metin track_id başına bir kez
+# çözülür ve önbelleğe alınır.
+YOLO_QR_DECODE = os.environ.get("YOLO_QR_DECODE", "1") == "1"
+YOLO_QR_UPSCALE = float(os.environ.get("YOLO_QR_UPSCALE", "4.0"))
+YOLO_QR_MARGIN_PX = int(os.environ.get("YOLO_QR_MARGIN_PX", "8"))
+# Renkli kutu sınıflandırması: insan aktörlerinin yerine konan KIRMIZI/MAVİ
+# kutular (2026-07-18, bkz. world + make_color_box_textures.py). Düz renkli
+# kutu nadir'de görünmez olduğu için (ölçüm: turuncu kutu 0.05) renkli kutular
+# ölçülmüş QR desenini korur → YOLOE onları yine 'qr code box' olarak bulur;
+# RENK ayrımı burada yapılır: bbox kırpıntısının HSV baskın rengi kutu
+# alanının en az MIN_FRAC'ı kadar kırmızı/maviyse kategori red_box/blue_box'a
+# çevrilir. Doku ölçümü: kare doku alanının 0.55'i saf renk (çerçeve+modüller),
+# siyah-beyaz QR kutularda 0.00 → 0.15 eşiği ikisini geniş marjla ayırır.
+YOLO_BOX_COLOR_CLASSIFY = os.environ.get("YOLO_BOX_COLOR_CLASSIFY", "1") == "1"
+YOLO_BOX_COLOR_MIN_FRAC = float(os.environ.get("YOLO_BOX_COLOR_MIN_FRAC", "0.15"))
 
 
 # Benzer sınıfları tek hedef kategorisine normalize eder: aynı cisim bir karede
@@ -101,6 +155,10 @@ CLASS_NORMALIZATION = {
     "pedestrian": "person",
     "walking person": "person",
     "car": "vehicle",
+    "automobile": "vehicle",
+    "sedan": "vehicle",
+    "suv": "vehicle",
+    "hatchback": "vehicle",
     "truck": "vehicle",
     "semi-truck": "vehicle",
     "pickup truck": "vehicle",
@@ -115,13 +173,53 @@ CLASS_NORMALIZATION = {
     "qr code box": "cargo_box",
     "blue cargo box": "cargo_box",
     "package": "cargo_box",
-    "drone": "drone",
-    "quadcopter": "drone",
-    "quadrotor": "drone",
-    "uav": "drone",
+    # NOT: 'drone/uav/quadcopter' KASITLI yok. Bu prompt'lar rotadaki drone
+    # cismini bulmaktan çok SİHA'nın KENDİ GÖLGESİNİ 'uav' olarak işaretliyordu
+    # (bkz. build_20260717_103118). Drone cismi world'den kaldırılıp yerine
+    # otomobil kondu; ilgili prompt'lar da kaldırıldı.
     "backpack": "backpack",
     "rucksack": "backpack",
     "knapsack": "backpack",
+    # Rotaya 2026-07-17'de eklenen yeni cisim türleri (ölçümle seçildi,
+    # bkz. scratchpad/probe2: stop sign 0.74, checkerboard 0.79 — nadir'de
+    # doğru etiketle ateşleyen tek iki yeni aday).
+    "stop sign": "stop_sign",
+    "checkerboard": "checker_panel",
+    "chessboard": "checker_panel",
+    # 3. tur ölçümle eklenen çeşitlilik (bkz. make_route_object_textures.py):
+    # nişan tahtası 'concentric circles':0.57-0.67.
+    # 'target' KASITLI kullanılmıyor: nişan tahtasında 0.61 veriyor ama SIRT
+    # ÇANTASINI da 0.23 ile 'target' sanıyordu (eşiğin üstü => çanta tabloda
+    # "Nişan Tahtası" görünüyordu). 'concentric circles' aynı cismi 0.64 ile
+    # bulup çantada 0.02'de kalıyor.
+    "concentric circles": "bullseye",
+    "target": "bullseye",
+    "bullseye": "bullseye",
+}
+
+
+# Sınıf-bazlı güven TABANI (normalize kategori -> min güven). Genel eşiğin
+# (effective_conf) ÜSTÜNE biner, altına inmez. person_conf_min'in tersi:
+# o bir cismi kurtarmak için eşiği DÜŞÜRÜR, bu ise hayalet etiketi elemek
+# için YÜKSELTİR.
+#
+# bullseye=0.30: 'concentric circles' promptu nişan tahtasını 0.57-0.67 ile
+# bulurken STOP TABELASINI da 0.15-0.22 ile "eş merkezli halka" sanıyor (stop
+# tabelası sekizgen + beyaz halka). Eşik 15 m'de 0.10 olduğu için bu hayalet
+# tabloya "Nişan Tahtası" satırı olarak düşüyordu. 0.30 tabanı ikisinin arasına
+# giriyor (3 bakış konumundan ölçüldü: gerçek min 0.57, hayalet maks 0.22).
+# stop_sign=0.30: hayalet ters yönde de işliyor — nişan tahtası (kırmızı/beyaz
+# halkalar) 0.15 ile 'stop sign' sanılıyor (stop tabelası da kırmızı-beyaz
+# yuvarlakça bir levha). Gerçek stop tabelaları 3 bakış konumunda da 0.71-0.81
+# verdiği için 0.30 tabanı ikisini geniş marjla ayırıyor.
+# checker_panel=0.30: 'checkerboard' promptu boş zemin/gölge yamalarında ~0.11-0.13
+# seviyesinde sahte pozitif üretiyordu. Gerçek dama paneli 0.79 güven ürettiği
+# için 0.30 tabanı zemin gürültüsünü eler.
+CLASS_CONF_MIN = {
+    "bullseye": float(os.environ.get("YOLO_BULLSEYE_CONF_MIN", "0.30")),
+    "stop_sign": float(os.environ.get("YOLO_STOP_SIGN_CONF_MIN", "0.30")),
+    "checker_panel": float(os.environ.get("YOLO_CHECKER_PANEL_CONF_MIN", "0.30")),
+    "vehicle": float(os.environ.get("YOLO_VEHICLE_CONF_MIN", "0.12")),
 }
 
 
@@ -151,6 +249,7 @@ class YoloDetectionLog(BaseModel):
     object: DetectionObjectLog
     track_id: Optional[int] = None
     bbox_xyxy: Optional[List[float]] = None
+    qr_text: Optional[str] = Field(default=None, description="Kutunun QR kodundan çözülen metin")
     hits: int = Field(default=1, ge=1)
     tracker_name: str = "bytetrack"
     source_topic: str
@@ -184,7 +283,112 @@ class YoloDetectionLog(BaseModel):
                 f"%{confidence_percent} güvenle tespit edildi."
             )
         hits_part = f" Hedef {self.hits} karede doğrulandı." if self.hits > 1 else ""
-        return f"Saat {self.local_time}'te, {alt_part}{coord_part} {obj_part}{hits_part}"
+        qr_part = f" QR içeriği: \"{self.qr_text}\"." if self.qr_text else ""
+        return f"Saat {self.local_time}'te, {alt_part}{coord_part} {obj_part}{hits_part}{qr_part}"
+
+
+class EgoStaticZones:
+    """İHA uçarken KARE İÇİNDE SABİT kalan sahte tespitleri (kendi gölgesi,
+    görüşe giren gövde parçası) öğrenip bastırır.
+
+    Ayırt edici işaret şu: 15 m irtifada kamera yerde ~25 m'lik bir şerit görür,
+    gerçek bir cisim ~13 m/s hızda kareyi ~2 sn'de (~20 m yolda) süpürüp çıkar —
+    kare içinde sabit KALAMAZ. SİHA'nın kendi gölgesi ise güneş açısı sabit
+    olduğu için uçakla birlikte taşınır, dolayısıyla hep aynı piksel bölgesinde
+    durur. Bir aday bölge, uçak min_travel_m yol aldığı halde hâlâ aynı
+    piksellerde görünüyorsa ego artefaktı olarak onaylanır ve o bölgeye düşen
+    tespitler bastırılır.
+
+    build_20260717_103118 bu imzayı birebir gösteriyor: track#9, 69 kare boyunca
+    bbox=[54,163,112,208] (±1 px), İHA ~13 m/s ilerlerken.
+
+    Yanlışlıkla gerçek cismi bastırmamak için üç koruma var:
+      * Onay yalnızca uçak GERÇEKTEN yol alırken verilir (min_travel_m).
+      * Kanıt KESİNTİSİZ olmalı (max_gap_s): bölge her karede yeniden
+        görülmezse sayaç sıfırlanır. Bu olmadan rotadaki ardışık cisimler aynı
+        piksel izinden geçtikçe bir bölgeyi "sabit" gibi gösterebiliyor —
+        kanıt farklı cisimlerden birikiyor.
+      * Bastırma, bölgenin öğrendiği boyuta yakın kutulara uygulanır; bölgenin
+        üstünden geçen daha büyük bir cisim (ör. traktör) bastırılmaz.
+    """
+
+    def __init__(self, radius_px=YOLO_EGO_RADIUS_PX, min_hits=YOLO_EGO_MIN_HITS,
+                 min_travel_m=YOLO_EGO_MIN_TRAVEL_M, ttl_s=YOLO_EGO_TTL_S,
+                 max_gap_s=YOLO_EGO_MAX_GAP_S):
+        self.radius_px = radius_px
+        self.min_hits = min_hits
+        self.min_travel_m = min_travel_m
+        self.ttl_s = ttl_s
+        self.max_gap_s = max_gap_s
+        self.zones = []
+
+    @staticmethod
+    def _center_wh(bbox):
+        x1, y1, x2, y2 = bbox
+        return (x1 + x2) / 2.0, (y1 + y2) / 2.0, abs(x2 - x1), abs(y2 - y1)
+
+    def _match(self, cx, cy):
+        best, best_d = None, self.radius_px
+        for z in self.zones:
+            d = math.hypot(z["cx"] - cx, z["cy"] - cy)
+            if d <= best_d:
+                best, best_d = z, d
+        return best
+
+    def update(self, bboxes, travel_m, now):
+        """Ham tespit kutularını bölgelere işler. Bastırmadan ÖNCE çağrılmalı ki
+        bastırılan gölge kendi bölgesini taze tutmaya devam etsin."""
+        for bbox in bboxes:
+            if not bbox:
+                continue
+            cx, cy, w, h = self._center_wh(bbox)
+            z = self._match(cx, cy)
+            if z is None:
+                self.zones.append({
+                    "cx": cx, "cy": cy, "w": w, "h": h, "hits": 1,
+                    "travel_start": travel_m, "last_seen": now, "confirmed": False,
+                })
+                continue
+            # Kanıt kesintiye uğradıysa (bölge bir süre görünmeyip geri geldiyse)
+            # bu AYNI cismin sürekli orada durduğunu göstermez — büyük olasılıkla
+            # aynı iz üzerinden geçen BAŞKA bir cisim. Sayacı sıfırdan başlat.
+            if now - z["last_seen"] > self.max_gap_s:
+                z["cx"], z["cy"], z["w"], z["h"] = cx, cy, w, h
+                z["hits"] = 1
+                z["travel_start"] = travel_m
+                z["last_seen"] = now
+                z["confirmed"] = False
+                continue
+            # EMA: gölge, güneş açısı/uçuş yönü değiştikçe yavaşça kayar.
+            z["cx"] += 0.2 * (cx - z["cx"])
+            z["cy"] += 0.2 * (cy - z["cy"])
+            z["w"] += 0.2 * (w - z["w"])
+            z["h"] += 0.2 * (h - z["h"])
+            z["hits"] += 1
+            z["last_seen"] = now
+            if (not z["confirmed"] and z["hits"] >= self.min_hits
+                    and travel_m - z["travel_start"] >= self.min_travel_m):
+                z["confirmed"] = True
+        self.zones = [z for z in self.zones if now - z["last_seen"] <= self.ttl_s]
+
+    def is_ego(self, bbox):
+        """bbox onaylanmış bir ego bölgesine (ve o bölgenin boyut sınıfına) düşüyor mu?"""
+        if not bbox:
+            return False
+        cx, cy, w, h = self._center_wh(bbox)
+        for z in self.zones:
+            if not z["confirmed"]:
+                continue
+            if math.hypot(z["cx"] - cx, z["cy"] - cy) > self.radius_px:
+                continue
+            zone_area = max(1.0, z["w"] * z["h"])
+            ratio = (w * h) / zone_area
+            if 0.4 <= ratio <= 2.5:
+                return True
+        return False
+
+    def confirmed_zones(self):
+        return [z for z in self.zones if z["confirmed"]]
 
 
 class GazeboYoloNode(Node):
@@ -236,7 +440,9 @@ class GazeboYoloNode(Node):
         )
 
         # Tespit kalitesi metrikleri (periyodik YOLO_METRICS satırı için).
-        self.metrics = {"raw": 0, "filtered": 0, "tracked": 0, "missed_frames": 0}
+        # sup_* : hangi sahte-pozitif kapısının kaç kutu elediği (tuning için).
+        self.metrics = {"raw": 0, "filtered": 0, "tracked": 0, "missed_frames": 0,
+                        "sup_size": 0, "sup_ego": 0, "sup_nested": 0}
         self.last_metrics_log = 0.0
         self.metrics_frames = 0
         # track_id -> art arda görülme sayısı (hits). Temporal smoothing / min_hits.
@@ -260,6 +466,20 @@ class GazeboYoloNode(Node):
         # Her nesneye benzersiz ID atamak için takipçi ve fallback ID sayacı
         self.next_fallback_id = 1000
         self.active_fallback_tracks = []
+
+        # QR çözücü: cargo_box tespitlerinin içindeki QR metnini okur.
+        self.qr_detector = cv2.QRCodeDetector() if YOLO_QR_DECODE else None
+        self.qr_texts = {}   # track_id -> çözülen metin (track başına tek çözüm)
+
+        # Ego (kendi gölgesi) bastırma: kare içinde sabit kalan tespitleri öğrenir.
+        self.ego_zones = EgoStaticZones() if YOLO_EGO_FILTER else None
+        # Kat edilen toplam yol (m). Ego bölgesinin onayı buna dayanır; düz
+        # rotada yer değiştirme = yol, ama loiter/dönüş ihtimaline karşı adım
+        # adım biriktirilir.
+        self.travel_m = 0.0
+        self._last_gps = None
+        self.last_ego_log = 0.0
+        self.recent_draw_boxes = {}  # Çerçevenin kaybolmasını önlemek için son çizim kutuları tutma önbelleği
 
         if self.use_dynamic_conf:
             self.get_logger().info(
@@ -316,6 +536,12 @@ class GazeboYoloNode(Node):
             "tiling_enabled": YOLO_ENABLE_TILING,
             "tile_grid": YOLO_TILE_GRID,
             "min_hits": YOLO_MIN_HITS,
+            "min_obj_m": YOLO_MIN_OBJ_M,
+            "min_obj_m_person": YOLO_MIN_OBJ_M_PERSON,
+            "max_obj_m": YOLO_MAX_OBJ_M,
+            "cam_hfov": YOLO_CAM_HFOV,
+            "ego_filter": YOLO_EGO_FILTER,
+            "nested_filter": YOLO_NESTED_FILTER,
         }), flush=True)
 
     @staticmethod
@@ -336,9 +562,33 @@ class GazeboYoloNode(Node):
                 and not math.isnan(msg.latitude) and not math.isnan(msg.longitude)):
             self.latitude = float(msg.latitude)
             self.longitude = float(msg.longitude)
+            # Kat edilen yolu biriktir (ego bölgesi onayı için). Alt eşik park
+            # halindeki GPS gürültüsünün yol gibi birikmesini, üst eşik ise
+            # EKF/GPS ilk kilitlenmesindeki sıçramanın tek adımda yüzlerce metre
+            # eklemesini engeller.
+            if self._last_gps is not None:
+                step = self.distance_m(self._last_gps[0], self._last_gps[1],
+                                       self.latitude, self.longitude)
+                if 0.5 <= step <= 100.0:
+                    self.travel_m += step
+            self._last_gps = (self.latitude, self.longitude)
 
     def pose_cb(self, msg):
         self.altitude = float(msg.pose.position.z)
+
+    def px_per_m(self, frame_w: int) -> Optional[float]:
+        """Nadir kamerada 1 metrenin kaç piksel ettiği; irtifa yoksa None.
+
+        Kamera tam aşağı baktığı için yerde görülen şeridin genişliği
+        2*irtifa*tan(hfov/2)'dir; ölçek = kare genişliği / bu şerit. 15 m'de
+        80° FOV ve 640 px ile ~25 px/m => 4 m'lik kutu ~100 px.
+        """
+        if self.altitude is None or self.altitude <= 1.0:
+            return None
+        ground_w = 2.0 * self.altitude * math.tan(YOLO_CAM_HFOV / 2.0)
+        if ground_w <= 0.0:
+            return None
+        return frame_w / ground_w
 
     def image_callback(self, msg):
         # Kapanış sırasında (SIGTERM) ROS bağlamı geçersizken callback'e girme.
@@ -408,51 +658,117 @@ class GazeboYoloNode(Node):
             except Exception:
                 raw_candidates = []
 
-        # Filter detections in the Results object before plotting
+        # Filter detections in the Results object before plotting.
+        # İki geçiş: önce cisim OLABİLECEK adaylar süzülür (1. geçiş), sonra ego
+        # gölge bölgeleri bu adaylarla güncellenip bastırma uygulanır (2. geçiş).
+        # Ayrım şart: gölge bölgesi ancak bastırılan tespitlerle taze kalabilir,
+        # bu yüzden bölge güncellemesi bastırmadan ÖNCE olmalı.
         frame_area = float(frame.shape[0] * frame.shape[1])
+        scale = self.px_per_m(frame.shape[1])
         if len(results) > 0 and results[0].boxes is not None and len(results[0].boxes) > 0:
             try:
-                keep_indices = []
+                candidates = []  # 1. geçişi geçen adaylar
                 for idx, box in enumerate(results[0].boxes):
                     confidence = float(box.conf[0])
                     class_id = int(box.cls[0])
                     class_name = names.get(class_id, str(class_id))
                     norm_cat = normalize_category(class_name)
 
-                    # Tam-kare sahte pozitif filtresi
+                    # Güven kapısı önce gelir: çıkarım YOLO_RAW_CONF (0.05)
+                    # tabanında koşuyor, yani kutuların çoğu tanılama gürültüsü.
+                    # Bunları baştan elemek hem gereksiz işi hem de sup_*
+                    # metriklerinin (kapıların ne elediğini ölçer) şişmesini önler.
+                    # İnsanlar tepe perspektifinde ~0.05-0.08 güven ürettiği için
+                    # özel düşük eşik alır. Eşik ham etiketten hesaplanır; aşağıdaki
+                    # cargo_box->vehicle düzeltmesi person üretemediği için bu
+                    # sıra eşiği değiştirmez.
+                    is_person = (norm_cat == "person" or class_name.lower() in
+                                 ["person", "human", "pedestrian", "walking person"])
+                    if is_person:
+                        min_conf = self.person_conf_min
+                    else:
+                        # CLASS_CONF_MIN: hayalet etiket üreten sınıflar genel
+                        # eşiğin üstünde bir taban ister (bkz. tablodaki not).
+                        min_conf = max(effective_conf, CLASS_CONF_MIN.get(norm_cat, 0.0))
+                    if confidence < min_conf:
+                        continue
+
                     try:
                         x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        bbox_area = max(0.0, x2 - x1) * max(0.0, y2 - y1)
-                        if frame_area > 0 and bbox_area > YOLO_MAX_BBOX_FRAC * frame_area:
-                            continue
                     except Exception:
-                        pass
-                    if self.latitude is not None and self.longitude is not None:
-                        dist_to_start = self.distance_m(39.920782, 32.854115, self.latitude, self.longitude)
-                        if dist_to_start < 150.0:
+                        continue
+                    bw, bh = abs(x2 - x1), abs(y2 - y1)
+                    bbox = [x1, y1, x2, y2]
+
+                    # Tam-kare sahte pozitif filtresi (irtifa yokken tek savunma).
+                    bbox_area = bw * bh
+                    if frame_area > 0 and bbox_area > YOLO_MAX_BBOX_FRAC * frame_area:
+                        continue
+
+                    # Fiziksel boyut kapısı: irtifa biliniyorsa kutunun yerdeki
+                    # metre karşılığı hesaplanır. Hedef aralığının dışı cisim
+                    # olamaz => pist boyası/QR alt deseni (küçük) ve zemin/gölge
+                    # yaması (büyük) burada elenir. İnsan kendi alt sınırını alır:
+                    # tepeden ayak izi ~1.2 m, genel tabanın tam sınırında.
+                    if scale is not None:
+                        long_m = max(bw, bh) / scale
+                        min_m = YOLO_MIN_OBJ_M_PERSON if is_person else YOLO_MIN_OBJ_M
+                        if long_m > YOLO_MAX_OBJ_M or long_m < min_m:
+                            self.metrics["sup_size"] += 1
                             continue
 
-                    # Truck vs Cargo Box Çakışma Düzeltmesi (Uzun gövdeli araçların kutu olarak sanılmasını önler)
-                    try:
-                        x1, y1, x2, y2 = box.xyxy[0].tolist()
-                        bw, bh = abs(x2 - x1), abs(y2 - y1)
-                        aspect_ratio = max(bw, bh) / (min(bw, bh) + 1e-5)
-                        if norm_cat == "cargo_box" and aspect_ratio > 1.25 and max(bw, bh) > 50:
-                            for raw_lbl, raw_conf in raw_candidates:
-                                if normalize_category(raw_lbl) == "vehicle" and raw_conf >= 0.05:
-                                    class_name = raw_lbl
-                                    box.cls[0] = next((k for k, v in names.items() if v == raw_lbl), box.cls[0])
-                                    norm_cat = "vehicle"
-                                    break
-                    except Exception:
-                        pass
+                    # Kare kutu filtresi: Araçlar (car/vehicle) kuş bakışı uzun yapılıdır (aspect_ratio > 1.25).
+                    # Kare (1.0-1.25) kutular araç olarak etiketlendiğinde ve conf < 0.40 ise kırpılmış kutu hayaletidir.
+                    aspect_ratio = max(bw, bh) / (min(bw, bh) + 1e-5)
+                    if norm_cat == "vehicle" and aspect_ratio < 1.25 and confidence < 0.40:
+                        continue
 
-                    # İnsanlar tepe perspektifinde ~0.05-0.08 güven ürettiği için özel düşük eşik
-                    is_person = (norm_cat == "person" or class_name.lower() in ["person", "human", "pedestrian", "walking person"])
-                    required_conf = self.person_conf_min if is_person else effective_conf
+                    # Başlangıç ve kalkış bölgesi bastırması (0-150m, irtifa < 10m veya GPS henüz alınmadıysa)
+                    if self.latitude is None or self.longitude is None:
+                        continue
+                    dist_to_start = self.distance_m(39.920782, 32.854115, self.latitude, self.longitude)
+                    if dist_to_start < 150.0 or (self.altitude is not None and self.altitude < 10.0):
+                        continue
 
-                    if confidence >= required_conf:
-                        keep_indices.append(idx)
+                    candidates.append({
+                        "idx": idx, "bbox": bbox, "area": bbox_area,
+                        "category": norm_cat, "cls": class_name,
+                    })
+
+                # Ego bölgelerini adaylarla güncelle (bastırmadan önce).
+                if self.ego_zones is not None:
+                    before = len(self.ego_zones.confirmed_zones())
+                    self.ego_zones.update([c["bbox"] for c in candidates], self.travel_m, now)
+                    zones = self.ego_zones.confirmed_zones()
+                    if len(zones) > before:
+                        self.get_logger().info(
+                            "Ego (kendi gölgesi) bölgesi onaylandı: "
+                            + ", ".join(f"({z['cx']:.0f},{z['cy']:.0f})~{z['w']:.0f}x{z['h']:.0f}px"
+                                        for z in zones)
+                            + f" — İHA {self.travel_m:.0f}m yol aldığı halde bu kutu"
+                              " kare içinde sabit kaldı; bu bölge bastırılacak."
+                        )
+
+                keep_indices = []
+                for cand in candidates:
+                    # Kendi gölgesi: uçak yol alırken kare içinde sabit kalan bölge.
+                    if self.ego_zones is not None and self.ego_zones.is_ego(cand["bbox"]):
+                        self.metrics["sup_ego"] += 1
+                        continue
+                    # İç içe kutu: QR deseni / pist rakamı gibi yapılarda model hem
+                    # cismin tamamını hem içindeki alt kareleri ayrı 'box' sanıyor.
+                    # Aynı kategoriden belirgin daha büyük bir kutunun içinde kalan
+                    # küçük kutu o cismin parçasıdır => yalnızca büyüğü tut.
+                    if YOLO_NESTED_FILTER and any(
+                        o is not cand
+                        and o["category"] == cand["category"]
+                        and o["area"] >= 2.0 * cand["area"]
+                        and self._containment(cand["bbox"], o["bbox"]) >= 0.8
+                        for o in candidates
+                    ):
+                        self.metrics["sup_nested"] += 1
+                        continue
+                    keep_indices.append(cand["idx"])
                 results[0] = results[0][keep_indices]
             except Exception as e:
                 self.get_logger().warn(f"Tespit filtreleme sirasinda hata: {e}")
@@ -514,6 +830,61 @@ class GazeboYoloNode(Node):
         # Araçların (Kamyon/Treyler/Traktör) parçalı tespiti yerine TEK VE BÜTÜN bir kutu üretmek için birleştirme:
         det_list = self.merge_vehicle_boxes(det_list)
 
+        # Renkli kutu ayrımı: cargo_box tespitleri bbox'ın baskın rengine göre
+        # red_box/blue_box alt kategorisine ayrılır (QR çözümünden ÖNCE, çünkü
+        # çözüm kapısı bu kategorileri de kapsar).
+        self.classify_box_colors(frame, det_list)
+
+        # QR metni çözme: kutu tespitlerinin içindeki QR kod okunur, metin
+        # payload'a/loga eklenir ve annotated kareye yazılır.
+        if self.qr_detector is not None:
+            self.decode_qr_texts(frame, det_list, annotated)
+
+        # Bütün güncel kare hedeflerini (det_list) annotated kareye belirgin çiz
+        for d in det_list:
+            bbox = d.get("bbox")
+            if bbox is not None:
+                try:
+                    x1, y1, x2, y2 = [int(p) for p in bbox]
+                    cat = d.get("category", "object")
+                    cls_name = d.get("cls", cat)
+                    conf = d.get("conf", 0.0)
+                    tid = d.get("track_id")
+
+                    label_text = f"{cls_name}:{conf:.2f}"
+                    if tid is not None:
+                        label_text += f" #{tid}"
+
+                    # İnsana özel parlak sarı/turkuaz vurgu rengi (BGR: 0, 230, 255), çizgi kalınlığı 3px
+                    if cat == "person":
+                        color = (0, 235, 255)
+                        thick = 3
+                    elif cat == "red_box":
+                        color = (40, 40, 230)
+                        thick = 3
+                    elif cat == "blue_box":
+                        color = (230, 100, 30)
+                        thick = 3
+                    elif cat == "stop_sign":
+                        color = (0, 0, 255)
+                        thick = 2
+                    elif cat == "checker_panel":
+                        color = (255, 0, 255)
+                        thick = 2
+                    else:
+                        color = (0, 255, 0)
+                        thick = 2
+
+                    cv2.rectangle(annotated, (x1, y1), (x2, y2), color, thick)
+                    # Arka plan kutucuğu ile okunabilir etiket metni
+                    (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)
+                    y_text_bg = max(th + 6, y1)
+                    cv2.rectangle(annotated, (x1, y_text_bg - th - 6), (x1 + tw + 6, y_text_bg), (20, 20, 20), -1)
+                    cv2.putText(annotated, label_text, (x1 + 3, y_text_bg - 3),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.48, color, 1)
+                except Exception:
+                    pass
+
         # Metrikleri güncelle (periyodik YOLO_METRICS satırı için).
         self.metrics["raw"] += len(raw_candidates)
         self.metrics["filtered"] += len(det_list)
@@ -570,7 +941,11 @@ class GazeboYoloNode(Node):
             self.get_logger().info(
                 f"YOLO_METRICS frame={self.frame_count} raw={m['raw']} "
                 f"filtered={m['filtered']} tracked={m['tracked']} "
-                f"missed_frames={m['missed_frames']} conf={effective_conf:.2f} "
+                f"missed_frames={m['missed_frames']} "
+                f"sup_size={m['sup_size']} sup_ego={m['sup_ego']} "
+                f"sup_nested={m['sup_nested']} "
+                f"ego_zones={len(self.ego_zones.confirmed_zones()) if self.ego_zones else 0} "
+                f"travel={self.travel_m:.0f}m conf={effective_conf:.2f} "
                 f"iou={YOLO_IOU_THRESHOLD:.2f} imgsz={YOLO_IMGSZ} "
                 f"preprocess={self.preprocess_mode} "
                 f"tiling={int(YOLO_ENABLE_TILING)}"
@@ -590,11 +965,129 @@ class GazeboYoloNode(Node):
             except Exception as e:
                 self.get_logger().warn(f"Metrik loglama hatası: {e}")
             # Pencereyi sıfırla + track_hits'i sınırla (uzun uçuşta şişmesin).
-            self.metrics = {"raw": 0, "filtered": 0, "tracked": 0, "missed_frames": 0}
+            self.metrics = {"raw": 0, "filtered": 0, "tracked": 0, "missed_frames": 0,
+                            "sup_size": 0, "sup_ego": 0, "sup_nested": 0}
             self.metrics_frames = 0
             self.last_metrics_log = now
             if len(self.track_hits) > 2000:
                 self.track_hits.clear()
+
+    # Baskın renk -> normalize alt kategori (insan aktörlerinin yerine konan
+    # renkli kutular; bkz. YOLO_BOX_COLOR_CLASSIFY notu).
+    BOX_COLOR_CATEGORY = {"red": "red_box", "blue": "blue_box"}
+
+    def classify_box_colors(self, frame, det_list):
+        """cargo_box tespitlerini bbox içindeki baskın renge göre alt kategoriye
+        ayırır (red_box / blue_box). Renkli kutu dokusunun ~%55'i saf renk
+        (çerçeve + QR modülleri), siyah-beyaz QR kutularda renk oranı ~0.00;
+        eşik (YOLO_BOX_COLOR_MIN_FRAC=0.15) ikisini geniş marjla ayırır."""
+        if not YOLO_BOX_COLOR_CLASSIFY:
+            return
+        h, w = frame.shape[:2]
+        for d in det_list:
+            if d.get("category") != "cargo_box" or not d.get("bbox"):
+                continue
+            try:
+                x1, y1, x2, y2 = [int(v) for v in d["bbox"]]
+            except Exception:
+                continue
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            if x2 - x1 < 8 or y2 - y1 < 8:
+                continue
+            color = self._dominant_box_color(frame[y1:y2, x1:x2])
+            if color:
+                d["category"] = self.BOX_COLOR_CATEGORY[color]
+                d["box_color"] = color
+
+    @staticmethod
+    def _dominant_box_color(crop):
+        """Kırpıntının kırmızı/mavi piksel oranını HSV'de ölçer; eşik üstündeki
+        baskın rengi döndürür, ikisi de eşik altındaysa None (renksiz kutu)."""
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        hch, sch, vch = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+        sat = (sch > 70) & (vch > 50)
+        red_frac = float(np.mean(sat & ((hch <= 10) | (hch >= 170))))
+        blue_frac = float(np.mean(sat & (hch >= 100) & (hch <= 130)))
+        if red_frac < YOLO_BOX_COLOR_MIN_FRAC and blue_frac < YOLO_BOX_COLOR_MIN_FRAC:
+            return None
+        return "red" if red_frac >= blue_frac else "blue"
+
+    def decode_qr_texts(self, frame, det_list, annotated):
+        """cargo_box tespitlerinin bbox'ını kırpıp büyüterek içindeki QR kodun
+        metnini çözer. Metin det kaydına (qr_text) eklenir, track başına bir kez
+        JSONL 'qr_decoded' olayı olarak loglanır ve annotated kareye yazılır.
+
+        15 m irtifada 3 m kutu ~84 px göründüğü için doğrudan çözüm çoğu kez
+        başarısız; YOLO_QR_UPSCALE (4x cubic) büyütme sonrası cv2.QRCodeDetector
+        güvenilir çalışıyor (ölçüm: 60 px'e kadar). Çözüm başarısız olursa
+        sessizce geçilir — sonraki karede kutu daha merkezde/az bulanık gelir."""
+        h, w = frame.shape[:2]
+        for d in det_list:
+            if d.get("category") not in ("cargo_box", "red_box", "blue_box") or not d.get("bbox"):
+                continue
+            tid = d.get("track_id")
+            cached = self.qr_texts.get(tid) if tid is not None else None
+            if cached:
+                d["qr_text"] = cached
+                self._draw_qr_text(annotated, d["bbox"], cached)
+                continue
+            x1, y1, x2, y2 = d["bbox"]
+            m = YOLO_QR_MARGIN_PX
+            cx1, cy1 = max(0, int(x1) - m), max(0, int(y1) - m)
+            cx2, cy2 = min(w, int(x2) + m), min(h, int(y2) + m)
+            if cx2 - cx1 < 20 or cy2 - cy1 < 20:
+                continue
+            crop = frame[cy1:cy2, cx1:cx2]
+            text = ""
+            try:
+                up = cv2.resize(crop, None, fx=YOLO_QR_UPSCALE, fy=YOLO_QR_UPSCALE,
+                                interpolation=cv2.INTER_CUBIC)
+                text, _, _ = self.qr_detector.detectAndDecode(up)
+                if not text:
+                    # Gri + Otsu eşikleme: düşük kontrast/render gürültüsünde
+                    # ikinci şans.
+                    gray = cv2.cvtColor(up, cv2.COLOR_BGR2GRAY)
+                    _, binary = cv2.threshold(gray, 0, 255,
+                                              cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    text, _, _ = self.qr_detector.detectAndDecode(binary)
+            except Exception:
+                continue
+            if not text:
+                continue
+            d["qr_text"] = text
+            if tid is not None:
+                self.qr_texts[tid] = text
+                if len(self.qr_texts) > 500:
+                    self.qr_texts.clear()
+            self._draw_qr_text(annotated, d["bbox"], text)
+            now_local = datetime.now(LOCAL_TZ)
+            self.get_logger().info(
+                f"QR metni çözüldü (hedef #{tid}): \"{text}\""
+            )
+            print(json.dumps({
+                "event_type": "qr_decoded",
+                "timestamp": now_local.isoformat(),
+                "local_time": now_local.strftime("%H:%M:%S"),
+                "track_id": tid,
+                "qr_text": text,
+                "uav_altitude_m": self.altitude,
+                "latitude": self.latitude,
+                "longitude": self.longitude,
+                "message": f"Kutunun ({tid}) üzerindeki QR kod okundu: \"{text}\"",
+            }, ensure_ascii=False), flush=True)
+
+    @staticmethod
+    def _draw_qr_text(annotated, bbox, text):
+        """Çözülen QR metnini annotated karede kutunun altına yazar."""
+        try:
+            x1 = int(bbox[0])
+            y2 = int(bbox[3])
+            y = min(annotated.shape[0] - 4, y2 + 12)
+            cv2.putText(annotated, text, (max(0, x1), y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 0), 1)
+        except Exception:
+            pass
 
     def _merge_tile_detections(self, frame, annotated, det_list, effective_conf, frame_area):
         """Tile tespitlerini filtreleyip (bbox-frac, başlangıç bastırma, eşik)
@@ -602,11 +1095,21 @@ class GazeboYoloNode(Node):
         annotated kareyi döndürür."""
         tile_dets = self.run_tiles(frame, min(effective_conf, YOLO_RAW_CONF))
         suppress_start = False
-        if self.latitude is not None and self.longitude is not None:
-            if self.distance_m(39.920782, 32.854115, self.latitude, self.longitude) < 150.0:
+        if self.latitude is None or self.longitude is None:
+            suppress_start = True
+        else:
+            dist_to_start = self.distance_m(39.920782, 32.854115, self.latitude, self.longitude)
+            if dist_to_start < 150.0 or (self.altitude is not None and self.altitude < 10.0):
                 suppress_start = True
         for td in tile_dets:
-            if td["conf"] < effective_conf:
+            norm_cat = normalize_category(td["cls"])
+            is_person = (norm_cat == "person" or td["cls"].lower() in
+                         ["person", "human", "pedestrian", "walking person"])
+            if is_person:
+                min_conf = self.person_conf_min
+            else:
+                min_conf = max(effective_conf, CLASS_CONF_MIN.get(norm_cat, 0.0))
+            if td["conf"] < min_conf:
                 continue
             if suppress_start:
                 continue
@@ -615,6 +1118,19 @@ class GazeboYoloNode(Node):
                 area = max(0.0, bbox[2] - bbox[0]) * max(0.0, bbox[3] - bbox[1])
                 if area > YOLO_MAX_BBOX_FRAC * frame_area:
                     continue
+            # Tam kare yolundaki aynı kapılar burada da geçerli: fiziksel boyut
+            # ve kendi gölgesi. (Tile tespitleri plot()'a girmediği için elle.)
+            scale = self.px_per_m(frame.shape[1])
+            if bbox is not None and scale is not None:
+                long_m = max(bbox[2] - bbox[0], bbox[3] - bbox[1]) / scale
+                is_person = normalize_category(td["cls"]) == "person"
+                min_m = YOLO_MIN_OBJ_M_PERSON if is_person else YOLO_MIN_OBJ_M
+                if long_m > YOLO_MAX_OBJ_M or long_m < min_m:
+                    self.metrics["sup_size"] += 1
+                    continue
+            if self.ego_zones is not None and self.ego_zones.is_ego(bbox):
+                self.metrics["sup_ego"] += 1
+                continue
             # Tam-kare tespitleriyle çakışıyorsa (aynı cisim) atla.
             if any(self._iou(bbox, d.get("bbox")) >= 0.4 for d in det_list):
                 continue
@@ -804,6 +1320,22 @@ class GazeboYoloNode(Node):
         return inter / union if union > 0 else 0.0
 
     @staticmethod
+    def _containment(inner, outer):
+        """inner kutusunun alanının ne kadarı outer'ın içinde kalıyor (0-1).
+
+        IoU'dan farkı: boyutları çok farklı kutularda IoU küçük çıkar (küçük kutu
+        büyüğün içinde tamamen dursa bile), containment ise 1.0 verir — iç içe
+        kutuyu yakalamak için doğru ölçü budur.
+        """
+        if not inner or not outer:
+            return 0.0
+        ix1, iy1 = max(inner[0], outer[0]), max(inner[1], outer[1])
+        ix2, iy2 = min(inner[2], outer[2]), min(inner[3], outer[3])
+        inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+        inner_area = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
+        return inter / inner_area if inner_area > 0 else 0.0
+
+    @staticmethod
     def _boxes_close(a, b, max_dist=50.0):
         if not a or not b:
             return False
@@ -864,6 +1396,7 @@ class GazeboYoloNode(Node):
                     "conf": round(float(d["conf"]), 3),
                     "bbox": d["bbox"],
                     "hits": d.get("hits", 1),
+                    "qr_text": d.get("qr_text"),
                 }
                 for d in det_list
             ],
@@ -896,6 +1429,7 @@ class GazeboYoloNode(Node):
                     ),
                     track_id=d["track_id"],
                     bbox_xyxy=d["bbox"],
+                    qr_text=d.get("qr_text"),
                     hits=d.get("hits", 1),
                     tracker_name=tracker,
                     source_topic=self.topic,
@@ -914,17 +1448,53 @@ class GazeboYoloNode(Node):
 def main(args=None):
     rclpy.init(args=args)
     # Hedef sınıf listesi ortam değişkeniyle ayarlanabilir (YOLO_TARGET_CLASSES,
-    # virgülle ayrık). Varsayılan liste bu ortamda VERİYLE seçildi:
-    # 'car' KASITLI dışarıda — gerçek araçlar (traktör/trailer) 'truck' olarak
-    # geliyor; 'car' ise neredeyse yalnızca zemini/gölgeyi tam-kare sanan sahte
-    # pozitif üretiyordu (bkz. build_144152: car:0.57 = %99 kare). Daha geniş
-    # prompt denemek için: YOLO_TARGET_CLASSES="person,human,truck,box,crate,cargo box".
-    # 'dumpster' ve 'trailer' de aynı gerekçeyle çıkarıldı: karşılık gelen cisimler
-    # rotadan kaldırıldı (yerlerine drone ve sırt çantası kondu), kalan prompt'lar
-    # yalnızca sahte pozitif yüzeyi olurdu — traktörler zaten 'semi-truck' geliyor.
-    default_classes = ("person,human,pedestrian,truck,semi-truck,tractor,"
-                       "box,crate,cargo box,orange box,qr code box,"
-                       "drone,quadcopter,uav,backpack,rucksack")
+    # virgülle ayrık). Liste rotayla BİREBİR eşleşir; kuralı şu: karşılığı
+    # rotada olmayan prompt yalnızca sahte pozitif yüzeyidir, o yüzden çıkarılır.
+    #
+    # 2026-07-17'de rota ölçüme göre sadeleşti (bkz. world dosyasındaki tablo):
+    # 15 m nadir'de YOLOE-26s'in ateşlediği TEK kavram 'qr code box' (QR desenli
+    # alçak kutu ~0.62, sırt çantası dokusu ~0.50); insan 0.09'da person_conf_min
+    # ile geçiyor. Traktör/otomobil/tekne/çadır/varil/koni ve DÜZ turuncu kutu
+    # ölçüldü => tespit yok; hepsi rotadan kaldırıldı. Dolayısıyla:
+    #   * 'drone/quadcopter/uav' YOK — cisim kaldırıldı ve bu prompt'lar SİHA'nın
+    #     kendi gölgesini kilitliyordu (build_20260717_103118: 33/33 tespit gölge).
+    #   * 'car/sedan/suv/truck/semi-truck/tractor' YOK — rotada araç kalmadı.
+    #     Zaten nadir'de 'car' ateşlemiyordu (gerçek mesh 4.3 m => 0.05) ama
+    #     'car' geçmişte zemini tam-kare sanıyordu (build_144152: car:0.57 = %99
+    #     kare), yani net sahte pozitif yüzeyiydi.
+    #   * 'orange box' YOK — düz turuncu kutular rotadan kaldırıldı.
+    # Araç gerekirse: YOLO_TARGET_CLASSES ile eklenebilir (CLASS_NORMALIZATION
+    # eşlemeleri duruyor), ama nadir'de ateşlemeyeceğini bilerek.
+    # 2026-07-17 rota güncellemesi: stop tabelası ve dama paneli eklendi
+    # (ölçümle doğrulandı: stop sign 0.74, checkerboard 0.79 — nadir'de doğru
+    # etiketle ateşliyorlar; bkz. world dosyası + scratchpad/probe2).
+    # 2026-07-17 güncelleme-2: nişan tahtası ('concentric circles') eklendi —
+    # GERÇEK dünyada, rotanın kendi asfaltı üzerinde, üç bakış konumundan
+    # ölçüldü (0.57-0.67). CLASS_CONF_MIN['bullseye']=0.30 ile birlikte gelir.
+    # Elenen adaylar (hepsi ölçüldü, tekrar denemeye değmez):
+    #   * 'crosswalk' / 'barcode' — desen güçlü ateşliyor ama 'qr code box'a
+    #     karışıp QR kutularla aynı kategoriye düşüyor.
+    #   * 'helicopter landing pad' (çapraz X işareti) — ÇİMENDE 0.397, ama
+    #     rotanın asfaltı üzerinde 0.063'e düşüyor; bu rotada kullanılamaz.
+    #   * 'warning sign' (tehlike üçgeni) — üçgeni 0.30-0.37 ile buluyor ama
+    #     STOP TABELASINI da 0.37 ile yakalıyor; aynı bantta oldukları için
+    #     hiçbir eşik ayıramıyor. Alternatif promptlar da ölçüldü, hepsi ya
+    #     zayıf ya başka cismi çalıyor (bkz. make_route_object_textures.py).
+    #   * 'target' — sırt çantasını çalıyor, yerine 'concentric circles'.
+    # 2026-07-17 güncelleme-4: DAF tır yerine Prius Hybrid kondu (route_prius_1);
+    # tepeden 'car' ateşleyip ateşlemediğini GERÇEK nadir kamerayla ölçmek için
+    # 'car,sedan,automobile' eklendi (CLASS_NORMALIZATION -> vehicle). 'car' geçmişte
+    # zemini tam-kare 'car:0.57' sanıyordu ama YOLO_MAX_BBOX_FRAC (0.40) + fiziksel
+    # boyut kapısı (maks 9 m) bu tam-kare hayaleti eliyor. Ateşlemezse bu üç prompt
+    # geri çıkarılır (bkz. memory siha-nadir-arac-taninmiyor).
+    # 2026-07-18 güncelleme-5: İNSAN AKTÖRLERİ ROTADAN KALDIRILDI, yerlerine
+    # iki renkli kutu (kırmızı/mavi) kondu. Kural gereği rotada karşılığı
+    # kalmayan person promptları listeden çıkarıldı (yalnızca sahte pozitif
+    # yüzeyiydiler). Renkli kutular ölçülmüş QR desenini taşıdığı için mevcut
+    # 'qr code box' promptlarıyla ateşler; RENK ayrımı prompt'la değil
+    # classify_box_colors (HSV baskın renk) ile yapılır → red_box / blue_box.
+    default_classes = ("box,crate,cargo box,qr code box,"
+                       "stop sign,checkerboard")
     target_classes = [
         c.strip() for c in os.environ.get("YOLO_TARGET_CLASSES", default_classes).split(",")
         if c.strip()

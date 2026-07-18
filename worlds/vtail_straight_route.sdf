@@ -54,24 +54,86 @@
       <uri>file:///home/delpiyero/Staj/models/siha_mini_talon/model.sdf</uri>
     </include>
 
-    <!-- ============ ROTA CISIMLERI (buyutulmus + cogaltilmis) ============
-         Kutular 2->4 m; QR/turuncu texture ile yuksek kontrast (tespit icin kenar).
-         Yeni turler: dumpster (konteyner/kutu) ve flatbed trailer (kamyon).
-         X = yana kaciklik (+-5 m kamera gorusunde), Y = kalkistan mesafe (m). -->
+    <!-- ============ ROTA CISIMLERI ============
+         Hedef secimi TAHMINLE DEGIL OLCUMLE yapildi (2026-07-17, Gazebo headless
+         render + gercek yoloe-26s, 15 m nadir, 640x480/80deg kamera):
+
+           QR desenli ALCAK kutu (3x3x0.6) ... qr code box:0.60-0.63  <- en iyi
+           Sirt cantasi (dokulu, mevcut) ..... qr code box:0.50
+           QR 4 m KUP (eski tasarim) ......... qr code box:0.38
+           Insan aktoru ...................... human:0.09 (person_conf_min ile gecer)
+           Duz turuncu kutu (eski T-04/T-09) . 0.05  => pratikte gorunmez
+           Traktor / otomobil / tekne / cadir /
+           konteyner / varil / koni / masa ... TESPIT YOK
+
+         Iki sonuc:
+         1) Nadir'de tespiti belirleyen sey SEKIL/SEMANTIK degil, IC-DESEN
+            KONTRASTI. Duz renkli yuzey (turuncu kutu) ates almiyor; QR gibi
+            ince taneli desen aliyor. Bu yuzden tum hedefler QR dokulu.
+         2) ALCAK profil kupten iyi: yuksek kutu tepeden yanlarini/perspektifini
+            gosteriyor, alcak kutu ise duz bir QR kodu gibi okunuyor (0.38->0.62).
+
+         2026-07-17 GUNCELLEME (cisim cesitliligi + metinli QR):
+         * QR kutular artik METINLI QR tasir (models/textures/qr_text_N.png,
+           make_qr_text_textures.py uretir). yolo.py ucusta bu metni cozup
+           yolo.log'a basar (event_type=qr_decoded).
+         * Yeni cisim turleri 2. tur olcumle secildi (scratchpad/probe2):
+             stop tabelasi (3.5 m yatay) ..... stop sign:0.74     <- dogru etiket
+             dama paneli (3.0 m, 8x8) ........ checkerboard:0.79  <- dogru etiket
+             boyali tepeden otomobil/kamyon .. TESPIT YOK
+             semsiye/futbol topu/solar panel . yanlis sinifa karisiyor
+           Yani cesitlilik, YOLOE'nin tepeden de tanidigi yuksek kontrastli
+           DUZLEMSEL desenlerle mumkun; hacimli araclar nadir'de hala tanimiyor
+           (bkz. memory: siha-nadir-arac-taninmiyor).
+         2026-07-18 GUNCELLEME-4: Insan aktorleri KALDIRILDI; yerlerine iki
+         FARKLI RENKTE kutu kondu (route_color_box_red / route_color_box_blue).
+         Duz renkli kutu nadir'de gorunmez oldugu icin (yukaridaki olcum:
+         turuncu kutu 0.05) renkli kutular olculmus QR desenini korur, rengi
+         ise kalin cerceve tasir; yolo.py tespiti bbox'in baskin HSV rengiyle
+         red_box/blue_box olarak siniflandirir (classify_box_colors).
+         X = yana kaciklik (+-5 m kamera gorusunde), Y = kalkistan mesafe (m).
+
+         2026-07-17 GUNCELLEME-2 (cesitlilik: +nisan tahtasi):
+         * Yeni desenler 3. tur olcumle SINANDI; yalnizca nisan tahtasi gecti
+           (make_route_object_textures.py basligindaki tabloya bak):
+             nisan tahtasi (3.2 m) ... 'concentric circles':0.57-0.67
+                                       (3 bakis konumundan olculdu)
+             capraz X isareti (3.2 m) ........ CIMENDE helicopter landing
+                                              pad:0.397 ama ROTANIN ASFALTI
+                                              uzerinde 0.063 => EKLENMEDI
+         * ARAC YAN YATIRMA DENENDI VE ELENDI: "otomobil nadir'de taninmiyorsa
+           yan yatiralim, model yandan taniyor" fikri olculdu. Gercek Fuel
+           hatchback mesh'i (dokulari duzeltilmis haliyle) yan yatirilinca
+           kavram 'box'tan 'automobile'a donuyor ama guven 0.086'da kaliyor —
+           esigin (0.10-0.15) altinda ve kareler arasinda tekrarlanmiyor, yani
+           gurultu tabani. Olcek supurmesi durumu IYILESTIRMIYOR:
+             yan yatik 1.0x (4.3 m) .... arac kavrami YOK
+             yan yatik 2.0x (8.6 m) .... automobile:0.029
+             yan yatik 3.0x (12.9 m) ... automobile:0.035
+             DIK 2.0x (kontrol) ........ arac kavrami YOK (cargo box:0.068)
+           2x'te siluet insan gozune apacik bir otomobil yan profili (tekerlekler
+           dahil) oldugu halde model ateslemiyor => sinir render/olcek degil,
+           modelin kavraminda. Cozum model tarafinda (nadir goruntulerle
+           fine-tune, eval/train_yolo.py).
+         * 2026-07-17 GUNCELLEME-3: otomobil yerine ESKI DAF cekici (kamyon)
+           yan yatik olarak rotaya kondu (route_truck_side_1, T-05). Bkz. o
+           modelin yanindaki not: gorsel/dekor amacli; yolo.py'nin default
+           prompt listesinde 'truck' YOK, yani su haliyle tespit uretmez. -->
+
 
     <model name="route_qr_box_1">
       <static>true</static>
-      <pose>0 200 2.0 0 0 0</pose>
+      <pose>0 200 0.3 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.6</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <geometry><box><size>3.0 3.0 0.6</size></box></geometry>
           <material>
             <ambient>0.8 0.8 0.8 1</ambient>
             <diffuse>0.8 0.8 0.8 1</diffuse>
             <specular>0.1 0.1 0.1 1</specular>
             <pbr><metal>
-              <albedo_map>/home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/qr_box/materials/textures/qr_code.png</albedo_map>
+              <albedo_map>/home/delpiyero/Staj/models/textures/qr_text_1.png</albedo_map>
               <roughness>0.6</roughness>
               <metalness>0</metalness>
             </metal></pbr>
@@ -80,173 +142,61 @@
       </link>
     </model>
 
-    <include>
-      <uri>file:///home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/daf_xf_450_tractor/model.sdf</uri>
-      <name>route_tractor_1</name>
-      <pose degrees="true">4 280 0.94 0 0 0</pose>
-    </include>
-
-    <!-- Sirt cantasi (T-03): eski dumpster'in yerini aldi; konum korundu
-         (X=0 rota merkezi, Y=330 => kamerada yarim kalmiyor). Gercek olcek
-         (~0.5m) 15m irtifada birkac piksel eder; QR/turuncu kutu mantigiyla
-         hedef boyutuna buyutuldu. Duz renk tepeden gurultu tabaninda kaliyor,
-         bu yuzden tepe yuzu backpack.png dokusuyla kaplandi
-         (models/textures/make_backpack_texture.py uretir) — kenar/deseni
-         esasen bu doku tasiyor. -->
-    <model name="route_backpack_1">
+    <!-- Stop tabelasi (T-03): yatay yatirilmis dusuk panel, tepeden okunur. -->
+    <model name="route_stop_sign_1">
       <static>true</static>
-      <pose>0 330 0.7 0 0 0</pose>
+      <pose>4 280 0.15 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>3.2 4.2 1.4</size></box></geometry></collision>
-        <visual name="body">
-          <geometry><box><size>3.2 4.2 1.4</size></box></geometry>
+        <collision name="collision"><geometry><box><size>3.5 3.5 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>3.5 3.5 0.3</size></box></geometry>
           <material>
             <ambient>0.8 0.8 0.8 1</ambient>
             <diffuse>0.8 0.8 0.8 1</diffuse>
             <specular>0.1 0.1 0.1 1</specular>
             <pbr><metal>
-              <albedo_map>/home/delpiyero/Staj/models/textures/backpack.png</albedo_map>
-              <roughness>0.9</roughness>
+              <albedo_map>/home/delpiyero/Staj/models/textures/stop_sign.png</albedo_map>
+              <roughness>0.7</roughness>
               <metalness>0</metalness>
             </metal></pbr>
           </material>
         </visual>
-        <!-- Tasima sapi: dokudaki sapin uzerine denk gelir. Omuz askilari
-             KASITLI yok — doku cantanin on yuzu (on cep + fermuar), on yuzu
-             yukari bakan bir cantada askilar altta kalir; tepeye ayrica askı
-             kutusu koymak hem celiskili olur hem de tanimayi saglayan doku
-             detayini iki koyu bantla orterdi. -->
-        <visual name="handle">
-          <pose>0 1.75 0.80 0 0 0</pose>
-          <geometry><box><size>1.0 0.35 0.26</size></box></geometry>
-          <material>
-            <ambient>0.10 0.13 0.20 1</ambient>
-            <diffuse>0.10 0.13 0.20 1</diffuse>
-          </material>
-        </visual>
       </link>
     </model>
 
-    <model name="route_orange_box_1">
-      <static>true</static>
-      <pose>0 440 2.0 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
-        <visual name="visual">
-          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
-          <material>
-            <ambient>0.95 0.45 0.05 1</ambient>
-            <diffuse>0.95 0.45 0.05 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-      </link>
-    </model>
 
-    <!-- Drone (T-05): eski flatbed trailer'in yerini aldi, konumu korundu
-         (X=4, Y=520). Hazir quadcopter modelleri (hexapod_copter, bicopter)
-         ucus eklentileri + onlarca link/joint tasidigi icin sabit dekor olarak
-         uygun degil; primitiflerden statik bir quad kuruldu. Tepeden bakista
-         ayirt edici olan X govde + 4 rotor diski silueti: koyu govde/kollar,
-         acik gri pervaneler => yesil cim uzerinde yuksek kontrast ve YOLOE'nin
-         istedigi kenar yogunlugu. Rotor merkezleri (+-1.77, +-1.77), acikligi
-         ~5.7 m — 15m irtifada 4m'lik kutularla ayni buyukluk sinifinda. -->
-    <model name="route_drone_1">
-      <static>true</static>
-      <pose>4 520 0.45 0 0 0</pose>
-      <link name="link">
-        <collision name="collision"><geometry><box><size>5.2 5.2 0.6</size></box></geometry></collision>
-        <!-- Govde: koyu merkez kutu + acik ust plaka (ic kenar uretir). -->
-        <visual name="body">
-          <geometry><box><size>1.8 1.8 0.5</size></box></geometry>
-          <material>
-            <ambient>0.10 0.10 0.12 1</ambient>
-            <diffuse>0.10 0.10 0.12 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
-          </material>
-        </visual>
-        <visual name="top_plate">
-          <pose>0 0 0.27 0 0 0</pose>
-          <geometry><box><size>1.2 1.2 0.06</size></box></geometry>
-          <material>
-            <ambient>0.45 0.47 0.50 1</ambient>
-            <diffuse>0.45 0.47 0.50 1</diffuse>
-          </material>
-        </visual>
-        <!-- X kollar: iki capraz bant. -->
-        <visual name="arm_a">
-          <pose>0 0 0 0 0 0.7854</pose>
-          <geometry><box><size>5.0 0.36 0.20</size></box></geometry>
-          <material>
-            <ambient>0.13 0.13 0.15 1</ambient>
-            <diffuse>0.13 0.13 0.15 1</diffuse>
-          </material>
-        </visual>
-        <visual name="arm_b">
-          <pose>0 0 0 0 0 -0.7854</pose>
-          <geometry><box><size>5.0 0.36 0.20</size></box></geometry>
-          <material>
-            <ambient>0.13 0.13 0.15 1</ambient>
-            <diffuse>0.13 0.13 0.15 1</diffuse>
-          </material>
-        </visual>
-        <!-- Motorlar + pervaneler: kol uclarinda 4 kose. -->
-        <visual name="motor_fl">
-          <pose>-1.77 1.77 0.16 0 0 0</pose>
-          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
-          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
-        </visual>
-        <visual name="prop_fl">
-          <pose>-1.77 1.77 0.40 0 0 0</pose>
-          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
-          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
-        </visual>
-        <visual name="motor_fr">
-          <pose>1.77 1.77 0.16 0 0 0</pose>
-          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
-          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
-        </visual>
-        <visual name="prop_fr">
-          <pose>1.77 1.77 0.40 0 0 0</pose>
-          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
-          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
-        </visual>
-        <visual name="motor_rl">
-          <pose>-1.77 -1.77 0.16 0 0 0</pose>
-          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
-          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
-        </visual>
-        <visual name="prop_rl">
-          <pose>-1.77 -1.77 0.40 0 0 0</pose>
-          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
-          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
-        </visual>
-        <visual name="motor_rr">
-          <pose>1.77 -1.77 0.16 0 0 0</pose>
-          <geometry><cylinder><radius>0.26</radius><length>0.40</length></cylinder></geometry>
-          <material><ambient>0.30 0.30 0.33 1</ambient><diffuse>0.30 0.30 0.33 1</diffuse></material>
-        </visual>
-        <visual name="prop_rr">
-          <pose>1.77 -1.77 0.40 0 0 0</pose>
-          <geometry><cylinder><radius>1.10</radius><length>0.05</length></cylinder></geometry>
-          <material><ambient>0.72 0.73 0.75 1</ambient><diffuse>0.72 0.73 0.75 1</diffuse></material>
-        </visual>
-      </link>
-    </model>
+
+    <!-- Kamyon (T-05): eski DAF XF 450 cekici, YAN YATIK (roll 90).
+         Govde ekseni X'te (yaw 0) => 5.96 m uzunluk kameranin +-5 m yan
+         bandina siger. z=1.25: yan yatinca yarim govde genisligi (2.49/2)
+         yere basma yuksekligi olur. Otomobil yerine bu kondu.
+
+         OLCULDU (2026-07-17, gercek yoloe-26s, bu poz, ROTANIN ASFALTI
+         uzerinde, 15 m nadir):
+           mevcut promptlarla ..... cargo box:0.198  <- HAYALET (esik 0.10!)
+           +'truck,semi-truck' .... semi-truck:0.096 <- esik alti
+           +'automobile' .......... automobile:0.026
+         Yani yan yatirma kamyonda da arac kavramini ACMIYOR (otomobildeki
+         0.086 ile ayni gurultu bandi) ama kabin QR kutulara ait 'cargo box'
+         sinifini 0.198 ile ateslediginden tabloda SAHTE "Kutu" uretir.
+         Bu hayaleti elemenin yolu CLASS_CONF_MIN['cargo_box'] tabani (gercek
+         QR kutu 0.60-0.63 / sirt cantasi 0.50 ile kamyonun 0.198'i arasinda
+         genis bosluk var) - bkz. yolo.py. -->
+
 
     <model name="route_qr_box_2">
       <static>true</static>
-      <pose>-4 600 2.0 0 0 0</pose>
+      <pose>0 440 0.3 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.6</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <geometry><box><size>3.0 3.0 0.6</size></box></geometry>
           <material>
             <ambient>0.8 0.8 0.8 1</ambient>
             <diffuse>0.8 0.8 0.8 1</diffuse>
             <specular>0.1 0.1 0.1 1</specular>
             <pbr><metal>
-              <albedo_map>/home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/qr_box/materials/textures/qr_code.png</albedo_map>
+              <albedo_map>/home/delpiyero/Staj/models/textures/qr_text_2.png</albedo_map>
               <roughness>0.6</roughness>
               <metalness>0</metalness>
             </metal></pbr>
@@ -255,72 +205,138 @@
       </link>
     </model>
 
-    <actor name="route_human_1">
-      <skin>
-        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
-        <scale>4.5</scale>
-      </skin>
-      <animation name="walk">
-        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
-        <interpolate_x>true</interpolate_x>
-      </animation>
-      <script>
-        <loop>true</loop>
-        <delay_start>0.0</delay_start>
-        <auto_start>true</auto_start>
-        <trajectory id="0" type="walk">
-          <waypoint><time>0.0</time><pose>-3 670 1.0 0 0 0</pose></waypoint>
-          <waypoint><time>5.0</time><pose>3 670 1.0 0 0 1.57</pose></waypoint>
-          <waypoint><time>10.0</time><pose>3 680 1.0 0 0 0</pose></waypoint>
-          <waypoint><time>15.0</time><pose>-3 680 1.0 0 0 -1.57</pose></waypoint>
-          <waypoint><time>20.0</time><pose>-3 670 1.0 0 0 3.14</pose></waypoint>
-        </trajectory>
-      </script>
-    </actor>
-
-    <include>
-      <uri>file:///home/delpiyero/ardupilot/Tools/sitl_models/Gazebo/models/daf_xf_450_tractor/model.sdf</uri>
-      <name>route_tractor_2</name>
-      <pose degrees="true">4 740 0.94 0 0 0</pose>
-    </include>
-
-    <model name="route_orange_box_2">
+    <!-- Dama paneli (T-06): 8x8 siyah-beyaz desen, 'checkerboard' olarak ateslar. -->
+    <model name="route_checker_panel_1">
       <static>true</static>
-      <pose>-3 810 2.0 0 0 0</pose>
+      <pose>4 520 0.15 0 0 0</pose>
       <link name="link">
-        <collision name="collision"><geometry><box><size>4.0 4.0 4.0</size></box></geometry></collision>
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.3</size></box></geometry></collision>
         <visual name="visual">
-          <geometry><box><size>4.0 4.0 4.0</size></box></geometry>
+          <geometry><box><size>3.0 3.0 0.3</size></box></geometry>
           <material>
-            <ambient>0.95 0.45 0.05 1</ambient>
-            <diffuse>0.95 0.45 0.05 1</diffuse>
-            <specular>0.2 0.2 0.2 1</specular>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/checker_panel.png</albedo_map>
+              <roughness>0.7</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
           </material>
         </visual>
       </link>
     </model>
 
-    <actor name="route_human_2">
-      <skin>
-        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
-        <scale>4.5</scale>
-      </skin>
-      <animation name="walk">
-        <filename>https://fuel.gazebosim.org/1.0/Mingfei/models/actor/tip/files/meshes/walk.dae</filename>
-        <interpolate_x>true</interpolate_x>
-      </animation>
-      <script>
-        <loop>true</loop>
-        <delay_start>0.0</delay_start>
-        <auto_start>true</auto_start>
-        <trajectory id="0" type="walk">
-          <waypoint><time>0.0</time><pose>-3 850 1.0 0 0 0</pose></waypoint>
-          <waypoint><time>5.0</time><pose>3 850 1.0 0 0 1.57</pose></waypoint>
-          <waypoint><time>10.0</time><pose>3 860 1.0 0 0 0</pose></waypoint>
-          <waypoint><time>15.0</time><pose>-3 860 1.0 0 0 -1.57</pose></waypoint>
-          <waypoint><time>20.0</time><pose>-3 850 1.0 0 0 3.14</pose></waypoint>
-        </trajectory>
-      </script>
-    </actor>
+    <model name="route_qr_box_3">
+      <static>true</static>
+      <pose>-4 600 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>3.0 3.0 0.6</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/qr_text_3.png</albedo_map>
+              <roughness>0.6</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- KIRMIZI kutu (T-07): insan aktörünün (route_human_1) yerine kondu.
+         Doku = ölçümle kanıtlanmış QR deseni + kalın KIRMIZI çerçeve
+         (make_color_box_textures.py). yolo.py bbox'ın baskın HSV renginden
+         kategoriyi red_box'a çevirir; QR metni de rengi söyler. -->
+    <model name="route_color_box_red">
+      <static>true</static>
+      <pose>-2 675 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>3.0 3.0 0.6</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/box_red.png</albedo_map>
+              <roughness>0.6</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <model name="route_qr_box_4">
+      <static>true</static>
+      <pose>4 740 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>3.0 3.0 0.6</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/qr_text_4.png</albedo_map>
+              <roughness>0.6</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Ikinci stop tabelasi (T-10). -->
+    <model name="route_stop_sign_2">
+      <static>true</static>
+      <pose>-3 810 0.15 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.5 3.5 0.3</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>3.5 3.5 0.3</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/stop_sign.png</albedo_map>
+              <roughness>0.7</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- MAVİ kutu (T-11): insan aktörünün (route_human_2) yerine kondu.
+         Kırmızı kutunun eşi; çerçeve/modüller MAVİ, QR metni "MAVI KUTU". -->
+    <model name="route_color_box_blue">
+      <static>true</static>
+      <pose>2 855 0.3 0 0 0</pose>
+      <link name="link">
+        <collision name="collision"><geometry><box><size>3.0 3.0 0.6</size></box></geometry></collision>
+        <visual name="visual">
+          <geometry><box><size>3.0 3.0 0.6</size></box></geometry>
+          <material>
+            <ambient>0.8 0.8 0.8 1</ambient>
+            <diffuse>0.8 0.8 0.8 1</diffuse>
+            <specular>0.1 0.1 0.1 1</specular>
+            <pbr><metal>
+              <albedo_map>/home/delpiyero/Staj/models/textures/box_blue.png</albedo_map>
+              <roughness>0.6</roughness>
+              <metalness>0</metalness>
+            </metal></pbr>
+          </material>
+        </visual>
+      </link>
+    </model>
   </world>
 </sdf>
