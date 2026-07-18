@@ -62,9 +62,11 @@ class TelemetryStreamThread(QThread):
             siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
             cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
             yaw = math.atan2(siny_cosp, cosy_cosp)
-            heading = int(math.degrees(yaw))
-            if heading < 0:
-                heading += 360
+            # MAVROS local_position/pose ENU'dur: yaw Doğu ekseninden CCW ölçülür
+            # (kuzeye uçarken yaw=+90°). Tüketiciler (pusula, harita, etiket)
+            # pusula açısı bekliyor: 0=Kuzey, saat yönünde artan. Dönüşüm
+            # yapılmazsa semboller 90° yan duruyordu.
+            heading = int(round(90.0 - math.degrees(yaw))) % 360
             self.data["heading"] = heading
             self.telemetry_received.emit(self.data.copy())
 

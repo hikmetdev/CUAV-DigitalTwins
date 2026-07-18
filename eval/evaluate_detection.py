@@ -22,14 +22,13 @@ M_PER_LON = 111139.0 * math.cos(math.radians(LAT_ORIGIN))
 
 GROUND_TRUTH_TARGETS = [
     {"id": "qr_box_1", "name": "QR Box 1", "category": "cargo_box", "east": 0.0, "north": 200.0, "size": 4.0},
-    {"id": "tractor_1", "name": "Tractor 1", "category": "vehicle", "east": 4.0, "north": 280.0, "size": 4.0},
-    {"id": "dumpster_1", "name": "Dumpster 1", "category": "cargo_box", "east": 0.0, "north": 330.0, "size": 4.5},
-    {"id": "orange_box_1", "name": "Orange Box 1", "category": "cargo_box", "east": 0.0, "north": 440.0, "size": 4.0},
-    {"id": "trailer_1", "name": "Trailer 1", "category": "vehicle", "east": 4.0, "north": 520.0, "size": 6.0},
-    {"id": "qr_box_2", "name": "QR Box 2", "category": "cargo_box", "east": -4.0, "north": 600.0, "size": 4.0},
+    {"id": "stop_sign_1", "name": "Stop Sign 1", "category": "stop_sign", "east": 4.0, "north": 280.0, "size": 3.5},
+    {"id": "qr_box_2", "name": "QR Box 2", "category": "cargo_box", "east": 0.0, "north": 440.0, "size": 4.0},
+    {"id": "checker_panel_1", "name": "Checker Panel 1", "category": "checker_panel", "east": 4.0, "north": 520.0, "size": 3.5},
+    {"id": "qr_box_3", "name": "QR Box 3", "category": "cargo_box", "east": -4.0, "north": 600.0, "size": 4.0},
     {"id": "human_1", "name": "Human 1", "category": "person", "east": 0.0, "north": 675.0, "size": 2.0},
-    {"id": "tractor_2", "name": "Tractor 2", "category": "vehicle", "east": 4.0, "north": 740.0, "size": 4.0},
-    {"id": "orange_box_2", "name": "Orange Box 2", "category": "cargo_box", "east": -3.0, "north": 810.0, "size": 4.0},
+    {"id": "qr_box_4", "name": "QR Box 4", "category": "cargo_box", "east": 4.0, "north": 740.0, "size": 4.0},
+    {"id": "stop_sign_2", "name": "Stop Sign 2", "category": "stop_sign", "east": -3.0, "north": 810.0, "size": 3.5},
     {"id": "human_2", "name": "Human 2", "category": "person", "east": 0.0, "north": 855.0, "size": 2.0},
 ]
 
