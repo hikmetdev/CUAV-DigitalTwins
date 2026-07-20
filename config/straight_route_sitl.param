@@ -2,3 +2,34 @@
 # Disables pre-arm sensor consistency checks so the fixed-wing mission starts
 # promptly after the GCS enables autonomous flight. Do not use this on hardware.
 ARMING_CHECK 0
+
+# --- Batarya izleme: gerçek zamanlı tüketim ---------------------------------
+# BATT_MONITOR 4 = "Analog Voltage and Current". Akım ölçümü ŞART: kalan yüzde
+# (battery_remaining) tüketilen mAh'ın akımdan zaman-entegrasyonuyla hesaplanır.
+# 3 (yalnız gerilim) olsaydı akım okunmaz, consumed_mah NaN kalır ve otopilot
+# geçerli yüzde bildirmezdi (MAVROS'ta percentage=-1). 4 ile yüzde gerçekten düşer.
+BATT_MONITOR 4
+
+# Paket kapasitesi (mAh). Yüzde = 100*(BATT_CAPACITY - consumed_mah)/BATT_CAPACITY.
+# Uçuş boyunca çekilen akım biriktikçe yüzde MONOTONİK olarak düşer.
+BATT_CAPACITY 5000
+
+# SITL analog batarya pin/ölçekleri. --model JSON (Gazebo harici fizik) yolunda
+# pin varsayılanı -1'dir (pin yok → 0 V/0 A okunur); harici modelde bu pinler
+# AÇIKÇA verilmelidir. Değerler SITL'in ürettiği pin gerilimiyle birebir eşleşir:
+#   voltage_pin = voltage/10.1 (pin 13),  current_pin = current/17.0 (pin 12)
+# (bkz. AP_HAL_SITL/SITL_State_common.cpp update_voltage_current).
+BATT_VOLT_PIN 13
+BATT_CURR_PIN 12
+BATT_VOLT_MULT 10.1
+BATT_AMP_PERVLT 17.0
+
+# SITL'in benzettiği dinlenme (yüksüz) paket gerilimi. Uçuş modelinde ölçülen
+# gerilim = SIM_BATT_VOLTAGE - 0.7*gaz olarak GAZA bağlı sarkar. 4S ~ 16.8 V dolu.
+# Telemetri hücre sayısını gözlenen en yüksek gerilimden kestirir (4S → renk eşiği).
+SIM_BATT_VOLTAGE 16.8
+
+# NOT: SIM_BATT_CAP_AH (kapasiteye dayalı SoC gerilim düşüşü) YALNIZCA Multicopter
+# ve QuadPlane çerçevelerinde işler (SIM_Battery.cpp). Düz uçak (ArduPlane) + JSON
+# yolunda etkisizdir; bu yüzden gerilimin SoC ile düşmesi SITL'de sağlanamaz —
+# gerilim yalnız gazla sarkar, yüzde ise akım entegrasyonuyla gerçekten düşer.

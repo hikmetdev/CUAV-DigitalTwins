@@ -20,16 +20,18 @@ LON_ORIGIN = 32.854115
 M_PER_LAT = 111139.0
 M_PER_LON = 111139.0 * math.cos(math.radians(LAT_ORIGIN))
 
+# Kategori adları yolo.py'nin normalize kategorileridir (CLASS_NORMALIZATION +
+# classify_box_colors): QR kutu -> cargo_box, renkli kutu -> red_box/blue_box.
 GROUND_TRUTH_TARGETS = [
-    {"id": "qr_box_1", "name": "QR Box 1", "category": "cargo_box", "east": 0.0, "north": 200.0, "size": 4.0},
+    {"id": "qr_box_1", "name": "QR Box 1", "category": "cargo_box", "east": 0.0, "north": 200.0, "size": 3.0},
     {"id": "stop_sign_1", "name": "Stop Sign 1", "category": "stop_sign", "east": 4.0, "north": 280.0, "size": 3.5},
-    {"id": "qr_box_2", "name": "QR Box 2", "category": "cargo_box", "east": 0.0, "north": 440.0, "size": 4.0},
-    {"id": "checker_panel_1", "name": "Checker Panel 1", "category": "checker_panel", "east": 4.0, "north": 520.0, "size": 3.5},
-    {"id": "qr_box_3", "name": "QR Box 3", "category": "cargo_box", "east": -4.0, "north": 600.0, "size": 4.0},
-    {"id": "human_1", "name": "Human 1", "category": "person", "east": 0.0, "north": 675.0, "size": 2.0},
-    {"id": "qr_box_4", "name": "QR Box 4", "category": "cargo_box", "east": 4.0, "north": 740.0, "size": 4.0},
+    {"id": "qr_box_2", "name": "QR Box 2", "category": "cargo_box", "east": 0.0, "north": 440.0, "size": 3.0},
+    {"id": "checker_panel_1", "name": "Checker Panel 1", "category": "checker_panel", "east": 4.0, "north": 520.0, "size": 3.0},
+    {"id": "qr_box_3", "name": "QR Box 3", "category": "cargo_box", "east": -4.0, "north": 600.0, "size": 3.0},
+    {"id": "color_box_red", "name": "Red Box", "category": "red_box", "east": -2.0, "north": 675.0, "size": 3.0},
+    {"id": "qr_box_4", "name": "QR Box 4", "category": "cargo_box", "east": 4.0, "north": 740.0, "size": 3.0},
     {"id": "stop_sign_2", "name": "Stop Sign 2", "category": "stop_sign", "east": -3.0, "north": 810.0, "size": 3.5},
-    {"id": "human_2", "name": "Human 2", "category": "person", "east": 0.0, "north": 855.0, "size": 2.0},
+    {"id": "color_box_blue", "name": "Blue Box", "category": "blue_box", "east": 2.0, "north": 855.0, "size": 3.0},
 ]
 
 
@@ -93,9 +95,8 @@ def evaluate_log_file(log_path: str) -> Dict[str, Any]:
     tp_count = 0
     fp_count = 0
     confidences = []
-    per_class = {"cargo_box": {"tp": 0, "fp": 0, "fn": 0, "conf_sum": 0.0},
-                 "vehicle": {"tp": 0, "fp": 0, "fn": 0, "conf_sum": 0.0},
-                 "person": {"tp": 0, "fp": 0, "fn": 0, "conf_sum": 0.0}}
+    per_class = {cat: {"tp": 0, "fp": 0, "fn": 0, "conf_sum": 0.0}
+                 for cat in sorted({t["category"] for t in GROUND_TRUTH_TARGETS})}
 
     # Status loglarından dron pozisyonunu izleyip hangi hedeflerin FOV'a girdiğini bul
     for det in detection_events:

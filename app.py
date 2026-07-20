@@ -81,12 +81,13 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QGridLayout, QLabel, QPushButton, QLineEdit, QTextBrowser, 
     QTableWidget, QTableWidgetItem, QHeaderView, QSplitter, 
-    QFrame, QPlainTextEdit, QProgressBar, QFileDialog
+    QFrame, QPlainTextEdit, QProgressBar, QFileDialog, QTabWidget
 )
 from styles import DARK_THEME_QSS
-from interface import CompassWidget, CameraSimulatorWidget, TimelineWidget, TacticalMapWidget
+from interface import (CompassWidget, CameraSimulatorWidget, TimelineWidget,
+                       TacticalMapWidget, McpWorkflowTrackerWidget, TelemetryChartsPanel)
 from threads import (CameraStreamThread, TelemetryStreamThread, DetectionStreamThread,
-                     GeminiChatThread, McpClient, McpError)
+                     GeminiChatThread, VideoYoloThread, McpClient, McpError)
 from scene_db import SceneDatabase
 
 # ----------------------------------------------------------------------
@@ -173,8 +174,8 @@ class GroundControlStation(QMainWindow):
         self.telemetry = {
             "alt": 0.0,
             "speed": 0.0,
-            "battery": 0,
-            "voltage": 0.0,
+            "battery": 100,
+            "voltage": 25.2,
             "mode": "DISCONNECTED",
             "lat": START_LAT,
             "lon": START_LON,
@@ -185,6 +186,8 @@ class GroundControlStation(QMainWindow):
         # AI Copilot'un "geçmiş telemetri" aracı için 1 Hz örnekleme tamponu
         # (update_telemetry_loop doldurur). 1800 örnek ≈ 30 dk uçuş.
         self.mission_start_ts = time.time()
+        self.takeoff_start_ts = None
+        self.flight_started = False
         self.telemetry_history = deque(maxlen=1800)
 
         self.detections = []
@@ -225,6 +228,7 @@ class GroundControlStation(QMainWindow):
         # yaşar; ilk sorguda başlatılır (tembel) ve uygulama ömrünce paylaşılır.
         self.mcp_client = None
         self.camera_thread = None
+        self.video_yolo_thread = None
         # Aktif kamera akışı: başlangıçta ham alt kamera; YOLO başlayınca kutulu
         # /yolo/image_annotated akışına geçilir (switch_camera_source ile).
         self.current_camera_source = "/bottom_camera/image"
@@ -252,18 +256,27 @@ class GroundControlStation(QMainWindow):
         self.telemetry_thread.log_signal.connect(self.add_terminal_log)
         self.telemetry_thread.start()
 
-        # YOLO tespit alıcısı: yolo.py'nin /yolo/detections yayınını dinler ve
-        # tespitleri canlı olarak tabloya + zaman çizelgesine düşürür.
-        self._det_counter = 0
-        # Kamera altındaki tablo yalnızca canlı YOLO tespitleriyle dolar (sahte
-        # önizleme kayıtları rota/waypoint için self.detections'ta tutulur).
-        self.live_detections = []
-        # live_detections tablo için 25 kayıtla sınırlı; detection_log ise uçuş
-        # başından beri görülen HER benzersiz hedefi tutar (AI Copilot'un tespit
-        # geçmişi aracı buradan okur). Aynı dict nesneleri paylaşıldığı için
-        # güven/son görülme güncellemeleri iki listeye de yansır.
-        self.detection_log = []
-        self._track_rows = {}      # track_id -> live_detections içindeki kayıt (satır güncellemek için)
+        # Aktif Kamera & Ekran Modu: "gazebo" veya "video"
+        self.active_camera_mode = "gazebo"
+
+        # Gazebo kamera akışı YOLO tespit verileri & geçmişi
+        self.gazebo_det_counter = 0
+        self.gazebo_live_detections = []
+        self.gazebo_detection_log = []
+        self.gazebo_track_rows = {}
+
+        # Canlı video (drone.mp4) YOLO tespit verileri & geçmişi
+        self.video_det_counter = 0
+        self.video_live_detections = []
+        self.video_detection_log = []
+        self.video_track_rows = {}
+
+        # Aktif ekranda gösterilen tespit verisi referansları
+        self._det_counter = self.gazebo_det_counter
+        self.live_detections = self.gazebo_live_detections
+        self.detection_log = self.gazebo_detection_log
+        self._track_rows = self.gazebo_track_rows
+
         self.detection_thread = DetectionStreamThread()
         self.detection_thread.detection_received.connect(self.handle_detection)
         self.detection_thread.log_signal.connect(self.add_terminal_log)
@@ -283,10 +296,9 @@ class GroundControlStation(QMainWindow):
         
         # Harita kurulumu, TacticalMapWidget loadFinished sinyalini yayınlayınca yapılır
 
-        # Pure simulation mode: otonom uçuş, ROS/MAVROS verisi hazır olunca
-        # otomatik başlatılır (manuel buton kaldırıldı; video kaynağı satırında
-        # yalnızca kamera değiştirme butonu var).
-        QTimer.singleShot(AUTONOMOUS_START_DELAY_MS, self.start_otonom_flight)
+        # Uçak simülasyon başladığında doğrudan havalanmaz (standby).
+        # Operatör AI Copilot'a "uçak uçmaya hazır", "kalkışa geç" vb. yazdığında havalanır.
+        self.add_terminal_log("Uçak pistte hazır (standby). Uçuşa başlamak için AI Copilot'a 'uçak uçmaya hazır' yazın.", "INFO")
         
         # Populate widgets initial data
         self.update_detections_table()
@@ -501,19 +513,30 @@ class GroundControlStation(QMainWindow):
         cam_config_layout.setContentsMargins(10, 0, 10, 0)
         cam_config_layout.setSpacing(8)
         
-        # Video kaynağı satırında yalnızca kamera değiştirme butonu bulunur:
-        # uçağın ön kamerası (/camera/image) ile alt kamerası (YOLO kutulu
-        # /yolo/image_annotated) arasında geçiş yapar.
+        # Gazebo akışında izlenecek görüş: alt kamera / ön kamera. Topic adı
+        # sabit DEĞİL — alt kamera, YOLO düğümü çalışıyorsa kutulanmış
+        # /yolo/image_annotated akışına, çalışmıyorsa ham /bottom_camera/image
+        # akışına bağlanır (camera_topic_for). Eskiden liste doğrudan topic
+        # tutuyordu ve açılıştaki /bottom_camera/image listede olmadığı için
+        # buton etiketi ile gerçek akış birbirini tutmuyordu.
         self.camera_views = [
-            ("/yolo/image_annotated", "Alt Kamera"),
-            ("/camera/image", "Ön Kamera"),
+            ("alt", "Alt Kamera"),
+            ("on", "Ön Kamera"),
         ]
         self.camera_view_index = 0
         self.btn_camera_toggle = QPushButton("Kamera: Alt Kamera")
         self.btn_camera_toggle.setFixedHeight(18)
-        self.btn_camera_toggle.setStyleSheet("font-size: 9px; padding: 0 10px; background-color: #0284c7; color: white; border: none; font-weight: bold;")
+        self.btn_camera_toggle.setStyleSheet("font-size: 9px; padding: 0 10px; background-color: #0284c7; color: white; border: none; font-weight: bold; border-radius: 2px;")
         self.btn_camera_toggle.clicked.connect(self.toggle_camera_view)
         cam_config_layout.addWidget(self.btn_camera_toggle)
+
+        # Kaynak geçiş butonu: Gazebo simülasyon kamerası <-> yerel drone.mp4
+        # video akışı arasında geçiş yapar.
+        self.btn_video_toggle = QPushButton("Video'ya Geç")
+        self.btn_video_toggle.setFixedHeight(18)
+        self.btn_video_toggle.setStyleSheet("font-size: 9px; padding: 0 10px; background-color: #10b981; color: white; border: none; font-weight: bold; border-radius: 2px;")
+        self.btn_video_toggle.clicked.connect(self.toggle_video_yolo)
+        cam_config_layout.addWidget(self.btn_video_toggle)
 
         cam_config_layout.addStretch()
         camera_layout.addWidget(cam_config_bar)
@@ -553,69 +576,115 @@ class GroundControlStation(QMainWindow):
         
         telemetry_layout.addWidget(tel_title_bar)
         
-        # Telemetry item cards list
+        # Telemetry Tabbed Container (Dark Navy & Emerald Green Theme)
+        self.telemetry_tab_widget = QTabWidget()
+        self.telemetry_tab_widget.setStyleSheet("""
+            QTabWidget::pane {
+                border: none;
+                background-color: #030712;
+            }
+            QTabBar::tab {
+                background-color: #0b111c;
+                color: #94a3b8;
+                font-family: 'Roboto Mono';
+                font-size: 10px;
+                font-weight: bold;
+                padding: 6px 12px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border: 1px solid #1e293b;
+                border-bottom: none;
+                margin-right: 2px;
+            }
+            QTabBar::tab:selected {
+                background-color: #0d1522;
+                color: #10b981;
+                border-bottom: 2px solid #10b981;
+            }
+            QTabBar::tab:hover {
+                color: #e2e8f0;
+            }
+        """)
+
+        # ------------------- 1. Sekme (Anlık Telemetri) -------------------
         tel_items_widget = QWidget()
         tel_items_layout = QVBoxLayout(tel_items_widget)
-        tel_items_layout.setContentsMargins(12, 10, 12, 10)
+        tel_items_layout.setContentsMargins(10, 8, 10, 8)
         tel_items_layout.setSpacing(8)
         
         # Altitude Card
         self.lbl_alt = QLabel("İRTİFA (ALT): <span style='color:#06b6d4; font-weight:bold;'>15.0 m</span>")
-        self.lbl_alt.setStyleSheet("font-family: 'Roboto Mono'; font-size: 12px; background-color:#0d1522; padding:8px; border-radius:4px; border-left: 3px solid #06b6d4;")
-        tel_items_layout.addWidget(self.lbl_alt)
+        self.lbl_alt.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; background-color:#0d1522; padding:6px 10px; border-radius:4px; border-left: 3px solid #06b6d4;")
+        self.lbl_alt.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        tel_items_layout.addWidget(self.lbl_alt, 1)
         
         # Speed Card
         self.lbl_speed = QLabel("HIZ (VELOCITY): <span style='color:#06b6d4; font-weight:bold;'>12.8 m/s</span>")
-        self.lbl_speed.setStyleSheet("font-family: 'Roboto Mono'; font-size: 12px; background-color:#0d1522; padding:8px; border-radius:4px; border-left: 3px solid #06b6d4;")
-        tel_items_layout.addWidget(self.lbl_speed)
+        self.lbl_speed.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; background-color:#0d1522; padding:6px 10px; border-radius:4px; border-left: 3px solid #06b6d4;")
+        self.lbl_speed.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        tel_items_layout.addWidget(self.lbl_speed, 1)
         
         # Battery Card
         bat_widget = QWidget()
         bat_widget.setStyleSheet("background-color:#0d1522; border-radius:4px; border-left: 3px solid #10b981;")
         bat_lyt = QVBoxLayout(bat_widget)
-        bat_lyt.setContentsMargins(8, 6, 8, 6)
-        bat_lyt.setSpacing(4)
+        bat_lyt.setContentsMargins(10, 6, 10, 6)
+        bat_lyt.setSpacing(3)
         
-        self.lbl_battery = QLabel("BATARYA (BAT): <span style='color:#10b981; font-weight:bold;'>87%</span> (22.8 V)")
-        self.lbl_battery.setStyleSheet("font-family: 'Roboto Mono'; font-size: 12px; background:none;")
+        self.lbl_battery = QLabel("BATARYA (BAT): <span style='color:#10b981; font-weight:bold;'>100%</span> (25.2 V)")
+        self.lbl_battery.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; background:none;")
         bat_lyt.addWidget(self.lbl_battery)
         
         self.bar_battery = QProgressBar()
-        self.bar_battery.setValue(87)
+        self.bar_battery.setValue(100)
         self.bar_battery.setTextVisible(False)
         self.bar_battery.setFixedHeight(5)
         self.bar_battery.setStyleSheet("QProgressBar { background-color: #030712; border-radius: 2px; } QProgressBar::chunk { background-color: #10b981; }")
         bat_lyt.addWidget(self.bar_battery)
-        tel_items_layout.addWidget(bat_widget)
+        tel_items_layout.addWidget(bat_widget, 1)
         
         # Mode Card
         self.lbl_mode = QLabel("UÇUŞ MODU: <span style='color:#ef4444; font-weight:bold;'>DISCONNECTED</span>")
-        self.lbl_mode.setStyleSheet("font-family: 'Roboto Mono'; font-size: 12px; background-color:#0d1522; padding:8px; border-radius:4px; border-left: 3px solid #f59e0b;")
-        tel_items_layout.addWidget(self.lbl_mode)
+        self.lbl_mode.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; background-color:#0d1522; padding:6px 10px; border-radius:4px; border-left: 3px solid #f59e0b;")
+        self.lbl_mode.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        tel_items_layout.addWidget(self.lbl_mode, 1)
         
         # Heading & Compass Card
         heading_card = QWidget()
         heading_card.setStyleSheet("background-color:#0d1522; border-radius:4px; border-left: 3px solid #06b6d4;")
         heading_layout = QHBoxLayout(heading_card)
-        heading_layout.setContentsMargins(8, 4, 8, 4)
+        heading_layout.setContentsMargins(10, 4, 10, 4)
         
         self.lbl_heading = QLabel(f"YÖNELİM: <span style='color:#06b6d4; font-weight:bold;'>{STRAIGHT_ROUTE_HEADING_DEG}° (Yaw)</span>")
-        self.lbl_heading.setStyleSheet("font-family: 'Roboto Mono'; font-size: 12px; background:none;")
+        self.lbl_heading.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; background:none;")
+        self.lbl_heading.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         heading_layout.addWidget(self.lbl_heading)
         heading_layout.addStretch()
         
-        # Add Custom Compass widget
         self.compass_widget = CompassWidget()
         self.compass_widget.set_heading(STRAIGHT_ROUTE_HEADING_DEG)
         heading_layout.addWidget(self.compass_widget)
-        tel_items_layout.addWidget(heading_card)
+        tel_items_layout.addWidget(heading_card, 1)
         
         # GPS Card
         self.lbl_gps = QLabel("GPS KOORDİNAT:<br><span style='color:#f8fafc;'>LAT: 39.920782<br>LON: 32.854115</span>")
-        self.lbl_gps.setStyleSheet("font-family: 'Roboto Mono'; font-size: 10px; background-color:#0d1522; padding:8px; border-radius:4px; border-left: 3px solid #64748b;")
-        tel_items_layout.addWidget(self.lbl_gps)
-        
-        telemetry_layout.addWidget(tel_items_widget)
+        self.lbl_gps.setStyleSheet("font-family: 'Roboto Mono'; font-size: 10px; background-color:#0d1522; padding:6px 10px; border-radius:4px; border-left: 3px solid #64748b;")
+        self.lbl_gps.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        tel_items_layout.addWidget(self.lbl_gps, 1)
+
+        # Uçuş Süresi ve Kat Edilen Mesafe (Tek Kartta Yan Yana)
+        self.lbl_flight_dist = QLabel("UÇUŞ SÜRESİ: <span style='color:#06b6d4; font-weight:bold;'>00:00</span> | MESAFE: <span style='color:#f59e0b; font-weight:bold;'>0 m</span>")
+        self.lbl_flight_dist.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; background-color:#0d1522; padding:6px 10px; border-radius:4px; border-left: 3px solid #10b981;")
+        self.lbl_flight_dist.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        tel_items_layout.addWidget(self.lbl_flight_dist, 1)
+
+        self.telemetry_tab_widget.addTab(tel_items_widget, "Anlık Telemetri")
+
+        # ------------------- 2. Sekme (Telemetri Grafikleri 2x2) -------------------
+        self.telemetry_chart = TelemetryChartsPanel()
+        self.telemetry_tab_widget.addTab(self.telemetry_chart, "Telemetri Grafikleri")
+
+        telemetry_layout.addWidget(self.telemetry_tab_widget)
         top_row_splitter.addWidget(telemetry_panel)
         
         workspace_splitter.addWidget(top_row_splitter)
@@ -679,19 +748,30 @@ class GroundControlStation(QMainWindow):
         timeline_vlm_layout.addWidget(tv_title_bar)
         
         tv_content = QWidget()
-        tv_content_lyt = QVBoxLayout(tv_content)
-        tv_content_lyt.setContentsMargins(12, 10, 12, 10)
+        tv_content_lyt = QHBoxLayout(tv_content)
+        tv_content_lyt.setContentsMargins(8, 6, 8, 6)
         tv_content_lyt.setSpacing(8)
         
-        # VLM Summary Box
+        # Sol Taraf: VLM Sahne Analizi
+        vlm_container = QWidget()
+        vlm_lyt = QVBoxLayout(vlm_container)
+        vlm_lyt.setContentsMargins(0, 0, 0, 0)
+        vlm_lyt.setSpacing(6)
+
         vlm_label_head = QLabel("SAHNE ANALİZİ (CANLI)")
         vlm_label_head.setStyleSheet("color: #f59e0b; font-size: 10px; font-weight: bold; font-family: 'Roboto Mono';")
-        tv_content_lyt.addWidget(vlm_label_head)
+        vlm_lyt.addWidget(vlm_label_head)
         
         self.vlm_text_box = QTextBrowser()
         self.vlm_text_box.setStyleSheet("font-family: 'Roboto Mono'; font-size: 11px; color:#e2e8f0; background-color: rgba(245,158,11,0.04); border:1px solid rgba(245,158,11,0.2); padding:10px; border-radius:4px; border-left:3px solid #f59e0b;")
-        tv_content_lyt.addWidget(self.vlm_text_box)
+        vlm_lyt.addWidget(self.vlm_text_box)
         
+        tv_content_lyt.addWidget(vlm_container, stretch=1)
+
+        # Sağ Taraf: MCP Workflow Tracker
+        self.mcp_tracker = McpWorkflowTrackerWidget()
+        tv_content_lyt.addWidget(self.mcp_tracker, stretch=1)
+
         self.timeline_widget = None
         
         timeline_vlm_layout.addWidget(tv_content)
@@ -836,6 +916,10 @@ class GroundControlStation(QMainWindow):
         # 1. Update clock
         self.clock_label.setText(datetime.now().strftime("%H:%M:%S"))
 
+        d_lat = (self.telemetry["lat"] - START_LAT) * 111000.0
+        d_lon = (self.telemetry["lon"] - START_LON) * 111000.0 * math.cos(math.radians(START_LAT))
+        dist_m = int(math.sqrt(d_lat**2 + d_lon**2))
+
         # 1b. AI Copilot geçmiş telemetri tamponu (saniyede bir örnek).
         self.telemetry_history.append({
             "t": time.time() - self.mission_start_ts,
@@ -848,7 +932,10 @@ class GroundControlStation(QMainWindow):
             "lat": self.telemetry["lat"],
             "lon": self.telemetry["lon"],
             "heading": self.telemetry["heading"],
+            "pitch": self.telemetry.get("pitch", 0.0),
+            "roll": self.telemetry.get("roll", 0.0),
             "sats": self.telemetry["sats"],
+            "dist": dist_m,
         })
 
         # 5. Update Indicators UI
@@ -873,7 +960,38 @@ class GroundControlStation(QMainWindow):
 
         self.lbl_heading.setText(f"YÖNELİM: <span style='color:#06b6d4; font-weight:bold;'>{self.telemetry['heading']}° (Yaw)</span>")
         self.compass_widget.set_heading(self.telemetry["heading"])
+        
+        # Uçuş Süresi (Uçak harekete geçtiğinde / kalkış yaptığında başlar)
+        cur_alt = float(self.telemetry.get("alt", 0.0))
+        cur_speed = float(self.telemetry.get("speed", 0.0))
+        cur_mode = str(self.telemetry.get("mode", "")).upper()
+
+        if not self.flight_started and (cur_alt > 1.0 or cur_speed > 1.5 or cur_mode in ("TAKEOFF", "AUTO", "GUIDED", "FBWA")):
+            self.flight_started = True
+            self.takeoff_start_ts = time.time()
+            self.add_terminal_log("Uçak harekete geçti / kalkış başladı! Uçuş sayacı başlatıldı.", "INFO")
+
+        if self.flight_started and self.takeoff_start_ts is not None:
+            elapsed_sec = int(time.time() - self.takeoff_start_ts)
+        else:
+            elapsed_sec = 0
+
+        mins, secs = divmod(elapsed_sec, 60)
+        
+        d_lat = (self.telemetry["lat"] - START_LAT) * 111000.0
+        d_lon = (self.telemetry["lon"] - START_LON) * 111000.0 * math.cos(math.radians(START_LAT))
+        dist_m = int(math.sqrt(d_lat**2 + d_lon**2))
+        
+        self.lbl_flight_dist.setText(
+            f"UÇUŞ SÜRESİ: <span style='color:#06b6d4; font-weight:bold;'>{mins:02d}:{secs:02d}</span> | "
+            f"MESAFE: <span style='color:#f59e0b; font-weight:bold;'>{dist_m} m</span>"
+        )
+
         self.lbl_gps.setText(f"GPS KOORDİNAT:<br><span style='color:#f8fafc;'>LAT: {self.telemetry['lat']:.6f}<br>LON: {self.telemetry['lon']:.6f}</span>")
+
+        # Telemetri Zaman Serisi Grafiğini Güncelle
+        if hasattr(self, "telemetry_chart"):
+            self.telemetry_chart.set_history(self.telemetry_history)
         
         # Update connection badge based on telemetry status
         if self.telemetry["mode"] == "DISCONNECTED":
@@ -897,13 +1015,18 @@ class GroundControlStation(QMainWindow):
     # YOLO TESPİTLER & HARİTA ETKİLEŞİMİ
     # ------------------------------------------------------------------
     def update_detections_table(self):
-        self.detections_table.setRowCount(len(self.live_detections))
-        for row, det in enumerate(self.live_detections):
+        target_list = self.detection_log if hasattr(self, "detection_log") and self.detection_log else self.live_detections
+        self.detections_table.setRowCount(len(target_list))
+        for row, det in enumerate(target_list):
             id_item = QTableWidgetItem(det["id"])
             type_item = QTableWidgetItem(det["type"])
             conf_item = QTableWidgetItem(f"%{int(det['conf']*100)}")
-            time_item = QTableWidgetItem(det["time"])
-            gps_item = QTableWidgetItem(f"{det['lat']:.5f}, {det['lon']:.5f}")
+            time_item = QTableWidgetItem(det.get("time", det.get("first_time", "-")))
+            lat, lon = det.get("lat"), det.get("lon")
+            if lat is not None and lon is not None:
+                gps_item = QTableWidgetItem(f"{lat:.5f}, {lon:.5f}")
+            else:
+                gps_item = QTableWidgetItem("Video Akışı")
             # İrtifa bilgisini tespit verisiyle birlikte tut (tooltip olarak göster).
             if det.get("alt") is not None:
                 gps_item.setToolTip(f"İrtifa: {det['alt']:.0f} m")
@@ -1018,10 +1141,10 @@ class GroundControlStation(QMainWindow):
             #    (ör. box↔truck) geldiyse: son DET_MERGE_WINDOW sn içinde görülmüş
             #    ve bbox'ı örtüşen kayıt aynı cisimdir.
             matched = None
-            if track_id is not None and track_id in self._track_rows:
-                matched = self._track_rows[track_id]
+            if track_id is not None and track_id in self.gazebo_track_rows:
+                matched = self.gazebo_track_rows[track_id]
             if matched is None and bbox is not None:
-                for e in self.live_detections:
+                for e in self.gazebo_live_detections:
                     if now - e.get("_seen", 0.0) > self.DET_MERGE_WINDOW:
                         continue
                     if self._bbox_iou(bbox, e.get("bbox")) >= self.DET_MERGE_IOU:
@@ -1039,7 +1162,7 @@ class GroundControlStation(QMainWindow):
                 if bbox is not None:
                     matched["bbox"] = bbox
                 if track_id is not None:
-                    self._track_rows[track_id] = matched
+                    self.gazebo_track_rows[track_id] = matched
                 if conf > matched["conf"]:
                     matched["conf"] = conf
                     matched["type"] = type_tr
@@ -1048,8 +1171,8 @@ class GroundControlStation(QMainWindow):
                 continue
 
             # Yeni hedef.
-            self._det_counter += 1
-            target_id = f"Y-{self._det_counter:02d}"
+            self.gazebo_det_counter += 1
+            target_id = f"Y-{self.gazebo_det_counter:02d}"
             entry = {
                 "id": target_id,
                 "type": type_tr,
@@ -1065,20 +1188,20 @@ class GroundControlStation(QMainWindow):
                 "_seen": now,
             }
             self._register_qr_text(entry, d.get("qr_text"), announce=False)
-            self.live_detections.append(entry)
+            self.gazebo_live_detections.append(entry)
             # Aynı nesne referansı geçmiş kaydına da girer: tablodan düşse bile
             # AI Copilot uçuş boyunca görülen hedefi raporlayabilir.
-            self.detection_log.append(entry)
-            if len(self.detection_log) > 200:
-                self.detection_log.pop(0)
+            self.gazebo_detection_log.append(entry)
+            if len(self.gazebo_detection_log) > 200:
+                self.gazebo_detection_log.pop(0)
             if track_id is not None:
-                self._track_rows[track_id] = entry
+                self.gazebo_track_rows[track_id] = entry
             # Tabloyu makul uzunlukta tut; düşen kaydın track eşlemesini de temizle.
-            if len(self.live_detections) > 25:
-                removed = self.live_detections.pop(0)
-                for tid, e in list(self._track_rows.items()):
+            if len(self.gazebo_live_detections) > 25:
+                removed = self.gazebo_live_detections.pop(0)
+                for tid, e in list(self.gazebo_track_rows.items()):
                     if e is removed:
-                        del self._track_rows[tid]
+                        del self.gazebo_track_rows[tid]
             changed = True
             # Timeline ve harita yalnızca hedef ilk kez görüldüğünde işaretlenir.
             self.add_timeline_event("detection", f"YOLO tespiti: {type_tr} (%{int(conf*100)})")
@@ -1087,7 +1210,10 @@ class GroundControlStation(QMainWindow):
                 self.map_view.add_target(target_id, type_tr, lat, lon, conf)
             if entry.get("qr_text"):
                 self._announce_qr_text(entry)
-        if changed:
+        if changed and self.active_camera_mode == "gazebo":
+            self.live_detections = self.gazebo_live_detections
+            self.detection_log = self.gazebo_detection_log
+            self._track_rows = self.gazebo_track_rows
             self.update_detections_table()
             QTimer.singleShot(100, self.update_vlm_from_log)
 
@@ -1113,13 +1239,15 @@ class GroundControlStation(QMainWindow):
 
     def handle_table_row_click(self, item):
         row = item.row()
-        if row >= len(self.live_detections):
+        target_list = self.detection_log if hasattr(self, "detection_log") and self.detection_log else self.live_detections
+        if row >= len(target_list):
             return
-        det = self.live_detections[row]
-        # Haritayı seçilen hedefin koordinatına kilitle
-        if self.map_loaded:
-            self.map_view.center_on(det["lat"], det["lon"])
-        self.add_terminal_log(f"Harita {det['id']} koordinatına odaklandı ({det['lat']:.5f}, {det['lon']:.5f}).", "NAV")
+        det = target_list[row]
+        lat, lon = det.get("lat"), det.get("lon")
+        if lat is not None and lon is not None:
+            if self.map_loaded:
+                self.map_view.center_on(lat, lon)
+            self.add_terminal_log(f"Harita {det['id']} koordinatına odaklandı ({lat:.5f}, {lon:.5f}).", "NAV")
 
     def center_map_on_uav(self):
         if self.map_loaded:
@@ -1141,6 +1269,30 @@ class GroundControlStation(QMainWindow):
             self.timeline_widget.set_events(self.timeline_events)
 
     def update_vlm_from_log(self):
+        if self.active_camera_mode == "video":
+            if getattr(self, "video_detection_log", None):
+                messages = []
+                for d in self.video_detection_log[-15:]:
+                    t_str = d.get('time', d.get('first_time', ''))
+                    msg = f"Video tespiti [{d['id']}]: {d['type']} (%{int(d['conf']*100)}) - Saat: {t_str}"
+                    if msg not in messages:
+                        messages.append(msg)
+                if messages:
+                    html_content = ""
+                    for msg in messages:
+                        html_content += f"<div style='margin-bottom: 6px; line-height: 1.3;'>• {msg}</div>"
+                    self.vlm_text_box.setHtml(html_content)
+                    self.vlm_text_box.verticalScrollBar().setValue(self.vlm_text_box.verticalScrollBar().maximum())
+                    if self.scene_db is not None:
+                        self.scene_db.record(
+                            "\n".join(messages), source="video_detection",
+                            telemetry=self.telemetry,
+                            mission_time_s=time.time() - self.mission_start_ts,
+                            message_count=len(messages),
+                        )
+                    return True
+            return False
+
         yolo_log_path = os.path.join(BUILD_DIR, "yolo.log")
         if os.path.exists(yolo_log_path):
             try:
@@ -1286,6 +1438,18 @@ class GroundControlStation(QMainWindow):
         )
         self.add_terminal_log(f"Operatör AI Copilot sorgusu: '{query}'", "INFO")
 
+        # Uçuşa başlama anahtar kelimeleri kontrolü: eğer uçak henüz kalkmadıysa ve
+        # operatör "uçak uçmaya hazır", "kalkışa geç" vb. dediyse otomatik kalkışı başlat.
+        FLIGHT_START_KEYWORDS = [
+            "uçmaya hazır", "uçuşa hazır", "kalkışa geç", "kalkış yap",
+            "uçuşa geç", "uçuşu başlat", "uçağı kaldır", "kalkabilirsin",
+            "havalan", "uçuşa başla", "takeoff", "ready to fly", "start flight"
+        ]
+        query_lower = query.lower()
+        if any(kw in query_lower for kw in FLIGHT_START_KEYWORDS):
+            if not hasattr(self, "otonom_flight_process") or self.otonom_flight_process is None or self.otonom_flight_process.poll() is not None:
+                self.start_otonom_flight()
+
         # Aynı anda tek sorgu: önceki thread hâlâ çalışıyorsa yeni sorguyu reddet.
         if self.chat_thread is not None and self.chat_thread.isRunning():
             self.chat_history.append(
@@ -1331,6 +1495,8 @@ class GroundControlStation(QMainWindow):
         self.chat_thread.error_occurred.connect(self._on_copilot_error)
         self.chat_thread.action_requested.connect(self._on_copilot_action)
         self.chat_thread.log_signal.connect(self.add_terminal_log)
+        if hasattr(self, "mcp_tracker") and self.mcp_tracker is not None:
+            self.chat_thread.tool_signal.connect(self.mcp_tracker.handle_tool_event)
         self.chat_thread.start()
 
     def _ensure_mcp_client(self):
@@ -1482,6 +1648,10 @@ class GroundControlStation(QMainWindow):
         if action == "download_report":
             self.download_tactic_report()
             self.add_timeline_event("command", "AI: Taktik Raporu Derlendi")
+        elif action == "start_flight":
+            self.start_otonom_flight()
+            self.add_timeline_event("command", "AI: Otomatik Pist Kalkışı Başlatıldı")
+            self.add_terminal_log("Uçak motorları çalıştırıldı, otomatik kalkış ve otonom rota başlatıldı.", "INFO")
         elif action == "timeline_event":
             # MCP uçuş komutları (turn_heading/fly_forward/change_altitude)
             # gönderildiğinde zaman çizelgesine ve terminale iz düşülür.
@@ -1547,18 +1717,38 @@ class GroundControlStation(QMainWindow):
     # ------------------------------------------------------------------
     # CAMERA STREAM CONNECTOR
     # ------------------------------------------------------------------
+    def start_camera_stream(self):
+        """ROS kamera alıcısını (current_camera_source konusuyla) başlatır.
+        Zaten çalışıyorsa dokunmaz."""
+        if getattr(self, "camera_thread", None) is not None:
+            return
+        self.camera_thread = CameraStreamThread(self.current_camera_source)
+        self.camera_thread.frame_received.connect(self.camera_sim.set_frame)
+        self.camera_thread.log_signal.connect(self.add_terminal_log)
+        self.camera_thread.start()
+
+    def stop_camera_stream(self):
+        """ROS kamera alıcısını durdurur. Durdurmadan ÖNCE sinyalleri keser:
+        aksi halde kuyrukta bekleyen eski karelerin yeni kaynağın üstüne düşüp
+        bir an eski görüntüyü göstermesine yol açıyordu."""
+        thread = getattr(self, "camera_thread", None)
+        if thread is None:
+            return
+        try:
+            thread.frame_received.disconnect()
+            thread.log_signal.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        thread.stop()
+        self.camera_thread = None
+
     def toggle_camera_stream(self):
-        if not hasattr(self, "camera_thread") or self.camera_thread is None:
-            source = self.current_camera_source
-            self.camera_thread = CameraStreamThread(source)
-            self.camera_thread.frame_received.connect(self.camera_sim.set_frame)
-            self.camera_thread.log_signal.connect(self.add_terminal_log)
-            self.camera_thread.start()
+        """ROS kamera akışını açar/kapatır (açılışta bir kez çağrılır)."""
+        if getattr(self, "camera_thread", None) is None:
+            self.start_camera_stream()
         else:
-            self.camera_thread.stop()
-            self.camera_thread = None
-            self.camera_sim.set_frame(None) # Clear frame to show simulator fallback
-        self.add_terminal_log("Otonom uçuş butonu aktif. Simülasyon hızlı başlatma modu hazır.", "INFO")
+            self.stop_camera_stream()
+            self.camera_sim.set_frame(None)  # Clear frame to show simulator fallback
     
     def start_otonom_flight(self):
         if hasattr(self, "otonom_flight_process") and self.otonom_flight_process is not None:
@@ -1630,38 +1820,303 @@ class GroundControlStation(QMainWindow):
             )
             self.add_terminal_log("YOLO tespit düğümü başlatıldı (alt kamera izleniyor).", "INFO")
             # Model yüklenip yayına başladıktan sonra GUI kamerasını kutulanmış
-            # (bounding box'lı) /yolo/image_annotated akışına geçir.
-            QTimer.singleShot(6000, lambda: self.switch_camera_source("/yolo/image_annotated"))
+            # (bounding box'lı) /yolo/image_annotated akışına geçir — ama yalnızca
+            # kullanıcı hâlâ alt kamerayı seçiliyken (ön kameraya geçtiyse ezme).
+            QTimer.singleShot(6000, self._switch_to_annotated_if_bottom)
         except Exception as e:
             self.add_terminal_log(f"YOLO tespit düğümü başlatılamadı: {e}", "WARN")
+
+    def _switch_to_annotated_if_bottom(self):
+        """YOLO düğümü yayına başlayınca alt kamera görüşünü kutulanmış akışa
+        yükseltir; kullanıcı bu arada ön kameraya geçtiyse dokunmaz."""
+        if self.camera_views[self.camera_view_index][0] != "alt":
+            return
+        self.switch_camera_source("/yolo/image_annotated")
+
+    # --- Gazebo kamera görüşü (alt / ön) --------------------------------
+    def camera_topic_for(self, key):
+        """Görüş anahtarını (alt/on) o an geçerli ROS topic'ine çevirir.
+        Alt kamera: YOLO düğümü çalışıyorsa kutulanmış akış, aksi halde ham akış
+        (aksi halde yayıncısı olmayan bir topic'e bağlanıp ekran donuk kalıyordu)."""
+        if key == "on":
+            return "/camera/image"
+        yolo = getattr(self, "yolo_process", None)
+        if yolo is not None and yolo.poll() is None:
+            return "/yolo/image_annotated"
+        return "/bottom_camera/image"
+
+    @staticmethod
+    def camera_key_for_topic(topic):
+        """Topic → görüş anahtarı. Ön kamera dışındaki her şey alt kameradır."""
+        return "on" if topic == "/camera/image" else "alt"
 
     def switch_camera_source(self, topic):
         """GUI kamera akışını verilen ROS topic'ine yeniden bağlar (ör. YOLO'nun
         kutulanmış /yolo/image_annotated yayınına geçmek için). Buton etiketini
-        ve seçili kamera index'ini topic'e göre eşitler."""
+        ve seçili görüşü topic'e göre eşitler."""
+        key = self.camera_key_for_topic(topic)
+        label = dict(self.camera_views).get(key, key)
         self.current_camera_source = topic
-        for i, (t, label) in enumerate(self.camera_views):
-            if t == topic:
+        for i, (k, _lbl) in enumerate(self.camera_views):
+            if k == key:
                 self.camera_view_index = i
-                if hasattr(self, "btn_camera_toggle"):
-                    self.btn_camera_toggle.setText(f"Kamera: {label}")
                 break
-        if hasattr(self, "camera_thread") and self.camera_thread is not None:
-            self.camera_thread.stop()
-            self.camera_thread = None
-        self.toggle_camera_stream()  # yeni kaynakla yeniden bağlanır
-        self.add_terminal_log(f"Kamera akışı {topic} kaynağına geçirildi.", "INFO")
+        if hasattr(self, "btn_camera_toggle"):
+            self.btn_camera_toggle.setText(f"Kamera: {label}")
+
+        # Video modundayken ROS akışını ekrana bağlama: iki kaynak aynı
+        # widget'a kare basıp birbirinin görüntüsünü eziyordu. Seçim saklanır,
+        # Gazebo'ya dönüldüğünde bu kaynakla bağlanılır.
+        if getattr(self, "active_camera_mode", "gazebo") == "video":
+            self.add_terminal_log(f"Kamera kaynağı {topic} olarak kaydedildi (video modunda bağlanmadı).", "DEBUG")
+            return
+
+        self.stop_camera_stream()
+        self.camera_sim.set_source_label("GAZEBO", busy=True)
+        self.camera_sim.set_frame(None)  # eski görüşün karesi ekranda kalmasın
+        self.camera_status(f"{label} akışına geçiliyor ({topic})...", "INFO")
+        self.start_camera_stream()
+        self._watch_camera_stream(topic, label)
+
+    def _watch_camera_stream(self, topic, label):
+        """Geçişten sonra kare gelip gelmediğini denetler; gelmiyorsa kullanıcıyı
+        görüntü üstünde uyarır (ör. YOLO düğümü henüz yayına başlamamış olabilir)."""
+        start_count = self.camera_sim.frame_count
+
+        def check():
+            if self.current_camera_source != topic or getattr(self, "active_camera_mode", "gazebo") != "gazebo":
+                return  # bu arada başka kaynağa geçilmiş
+            if self.camera_sim.frame_count > start_count:
+                self.camera_sim.set_source_label("GAZEBO", busy=False)
+                self.camera_status(f"Aktif kamera: {label} ({topic})", "OK")
+            else:
+                self.camera_sim.set_source_label("GAZEBO", busy=False)
+                self.camera_status(
+                    f"{label} ({topic}) yayını gelmiyor — konu henüz yayınlanmıyor olabilir.",
+                    "WARN",
+                )
+
+        QTimer.singleShot(3000, check)
 
     def toggle_camera_view(self):
-        """'Kamera Değiştir' butonu: ön kamera ile alt kamera arasında geçiş yapar."""
+        """'Kamera: Alt/Ön Kamera' butonu: Gazebo akışında ön kamera ile alt kamera
+        arasında geçiş yapar. Video (drone.mp4) modunda ROS akışı ekranda olmadığı
+        için yalnızca seçim kaydedilir, kullanıcı görüntü üstünde uyarılır."""
         self.camera_view_index = (self.camera_view_index + 1) % len(self.camera_views)
-        topic, _label = self.camera_views[self.camera_view_index]
+        key, label = self.camera_views[self.camera_view_index]
+        topic = self.camera_topic_for(key)
+        if getattr(self, "active_camera_mode", "gazebo") == "video":
+            self.current_camera_source = topic
+            self.btn_camera_toggle.setText(f"Kamera: {label}")
+            self.camera_status(
+                f"{label} seçildi — Gazebo kamerasına dönünce etkin olacak.", "WARN"
+            )
+            return
         self.switch_camera_source(topic)
+
+    def camera_status(self, text, level="INFO", sticky=False, terminal=True):
+        """Kamera kaynağı geçişiyle ilgili log satırını GÖRÜNTÜNÜN ÜZERİNDE
+        gösterir (istenirse terminal loguna da düşürür)."""
+        if hasattr(self, "camera_sim"):
+            self.camera_sim.push_status(text, level, sticky=sticky)
+        if terminal:
+            self.add_terminal_log(text, "INFO" if level in ("INFO", "OK") else level)
+
+    def toggle_video_yolo(self):
+        """Kamera geçiş butonu: Gazebo simülasyon kamerası ile yerel drone.mp4
+        video akışı arasında geçiş yapar. Geçiş esnasında hem görüntü kaynağı hem de
+        altındaki tespit tablosu/logları ilgili ekrana (ve geçmiş kayıtlarına) özel filtreler.
+        Geçiş logları görüntünün üzerindeki durum katmanında gösterilir."""
+        if self.active_camera_mode == "video" or (getattr(self, "video_yolo_thread", None) is not None and self.video_yolo_thread.isRunning()):
+            self.camera_sim.clear_status()
+            self.camera_sim.set_source_label("GAZEBO", busy=True)
+            self.camera_status("Video akışı durduruluyor, Gazebo kamerasına dönülüyor...", "WARN")
+            if getattr(self, "video_yolo_thread", None) is not None:
+                self.video_yolo_thread.stop()
+                self.video_yolo_thread = None
+
+            self.active_camera_mode = "gazebo"
+            self.live_detections = self.gazebo_live_detections
+            self.detection_log = self.gazebo_detection_log
+            self._track_rows = self.gazebo_track_rows
+
+            self.btn_video_toggle.setText("Video'ya Geç")
+            self.btn_video_toggle.setStyleSheet(
+                "font-size: 9px; padding: 0 10px; background-color: #10b981; color: white; border: none; font-weight: bold; border-radius: 2px;"
+            )
+            # Seçili görüşün O ANKİ topic'ine bağlan (YOLO düğümü kapandıysa ham
+            # alt kamera akışına düşer; yayıncısı olmayan konuya asılı kalmaz).
+            sel_key = self.camera_views[self.camera_view_index][0]
+            self.switch_camera_source(self.camera_topic_for(sel_key))
+            self.update_detections_table()
+            self.update_vlm_from_log()
+            self.camera_sim.set_source_label("GAZEBO", busy=False)
+            self.camera_status("Aktif kamera: Gazebo Simülasyonu. Gazebo tespit logları yüklendi.", "OK")
+            return
+
+        video_file = os.path.join(BASE_DIR, "drone.mp4")
+        if not os.path.exists(video_file):
+            self.camera_status(f"Canlı video dosyası bulunamadı: {video_file}", "ERROR")
+            return
+
+        self.btn_video_toggle.setText("⏳ Video Kameraya Geçiliyor...")
+        self.btn_video_toggle.setStyleSheet(
+            "font-size: 9px; padding: 0 10px; background-color: #f59e0b; color: white; border: none; font-weight: bold; border-radius: 2px;"
+        )
+        # Yükleme bitene kadar butonu kilitle: art arda basınca thread.stop()
+        # model yüklemesinin bitmesini beklediği için arayüz donuyordu.
+        self.btn_video_toggle.setEnabled(False)
+        self.camera_sim.clear_status()
+        self.camera_sim.set_source_label("VİDEO", busy=True)
+        self.camera_status("drone.mp4 video kaynağına geçiliyor, YOLOE modeli hazırlanıyor...", "WARN", sticky=True)
+        # Gazebo ROS akışını kes: iki kaynak aynı widget'a kare basarsa görüntü
+        # video ile Gazebo arasında titriyor.
+        self.stop_camera_stream()
+
+        self.video_yolo_thread = VideoYoloThread(video_path=video_file, parent=self)
+        self.video_yolo_thread.frame_received.connect(self.camera_sim.set_frame)
+        self.video_yolo_thread.stream_started.connect(self._on_video_yolo_started)
+        self.video_yolo_thread.load_failed.connect(self._on_video_yolo_failed)
+        self.video_yolo_thread.detections_ready.connect(self.handle_video_detections)
+        # Thread'in yükleme/hata logları hem terminale hem görüntü üstündeki
+        # durum katmanına düşer ki kullanıcı ilerlemeyi görüntü alanında görsün.
+        self.video_yolo_thread.log_signal.connect(
+            lambda msg, lvl: self.camera_status(msg, "WARN" if lvl == "WARN" else "INFO")
+        )
+        self.video_yolo_thread.start()
+
+    def _on_video_yolo_started(self):
+        self.active_camera_mode = "video"
+        self.live_detections = self.video_live_detections
+        self.detection_log = self.video_detection_log
+        self._track_rows = self.video_track_rows
+
+        self.btn_video_toggle.setText("Gazebo'ya Geç")
+        self.btn_video_toggle.setStyleSheet(
+            "font-size: 9px; padding: 0 10px; background-color: #06b6d4; color: white; border: none; font-weight: bold; border-radius: 2px;"
+        )
+        self.update_detections_table()
+        self.update_vlm_from_log()
+        self.btn_video_toggle.setEnabled(True)
+        self.camera_sim.clear_status()
+        self.camera_sim.set_source_label("VİDEO", busy=False)
+        self.camera_status("Aktif kamera: Video Akışı (drone.mp4). Video tespit logları yüklendi.", "OK")
+
+    def _on_video_yolo_failed(self, err_msg):
+        self.active_camera_mode = "gazebo"
+        self.live_detections = self.gazebo_live_detections
+        self.detection_log = self.gazebo_detection_log
+        self._track_rows = self.gazebo_track_rows
+
+        self.btn_video_toggle.setText("🎥 Kamera: Gazebo (Video'ya Geç)")
+        self.btn_video_toggle.setStyleSheet(
+            "font-size: 9px; padding: 0 10px; background-color: #10b981; color: white; border: none; font-weight: bold; border-radius: 2px;"
+        )
+        self.update_detections_table()
+        self.update_vlm_from_log()
+        self.btn_video_toggle.setEnabled(True)
+        self.camera_sim.clear_status()
+        self.camera_sim.set_source_label("GAZEBO", busy=False)
+        self.camera_status(f"Video kamerası başlatılamadı: {err_msg} — Gazebo'ya dönüldü.", "ERROR")
+        self.video_yolo_thread = None
+        # Kesilen Gazebo akışını geri bağla.
+        self.switch_camera_source(self.current_camera_source)
+
+    def handle_video_detections(self, data):
+        """drone.mp4 canlı video YOLOE tespit verisini kendi video tespit logunda tutar ve aktifse tabloyu günceller."""
+        raw_dets = data.get("detections", []) if isinstance(data, dict) else []
+        if not raw_dets:
+            return
+        now_ts = time.time()
+        now_str = datetime.now().strftime("%H:%M:%S")
+        lat = self.telemetry["lat"]
+        lon = self.telemetry["lon"]
+        alt = self.telemetry.get("alt")
+        changed = False
+
+        for d in raw_dets:
+            cls = d.get("cls", "nesne")
+            conf = float(d.get("conf", 0.90))
+            track_id = d.get("track_id")
+            bbox = d.get("bbox")
+            category = d.get("category") or cls
+            type_tr = self._cls_to_tr(category)
+
+            matched = None
+            if track_id is not None and track_id in self.video_track_rows:
+                matched = self.video_track_rows[track_id]
+            if matched is None and bbox is not None:
+                for e in self.video_live_detections:
+                    if now_ts - e.get("_seen", 0.0) > self.DET_MERGE_WINDOW:
+                        continue
+                    if self._bbox_iou(bbox, e.get("bbox")) >= self.DET_MERGE_IOU:
+                        matched = e
+                        break
+
+            if matched is not None:
+                matched["_seen"] = now_ts
+                matched["time"] = now_str
+                matched["lat"], matched["lon"], matched["alt"] = lat, lon, alt
+                matched["category"] = category
+                if bbox is not None:
+                    matched["bbox"] = bbox
+                if track_id is not None:
+                    self.video_track_rows[track_id] = matched
+                if conf > matched["conf"]:
+                    matched["conf"] = conf
+                    matched["type"] = type_tr
+                changed = True
+                continue
+
+            # Yeni video tespiti
+            self.video_det_counter += 1
+            target_id = f"V-{self.video_det_counter:02d}"
+            entry = {
+                "id": target_id,
+                "type": type_tr,
+                "category": category,
+                "conf": conf,
+                "time": now_str,
+                "first_time": now_str,
+                "lat": lat,
+                "lon": lon,
+                "alt": alt,
+                "bbox": bbox,
+                "hits": 1,
+                "_seen": now_ts,
+                "source": "video",
+            }
+            self.video_live_detections.append(entry)
+            self.video_detection_log.append(entry)
+            if len(self.video_detection_log) > 200:
+                self.video_detection_log.pop(0)
+            if track_id is not None:
+                self.video_track_rows[track_id] = entry
+            if len(self.video_live_detections) > 25:
+                removed = self.video_live_detections.pop(0)
+                for tid, e in list(self.video_track_rows.items()):
+                    if e is removed:
+                        del self.video_track_rows[tid]
+            changed = True
+            self.add_timeline_event("detection", f"Video YOLO tespiti: {type_tr} (%{int(conf*100)})")
+            self.add_terminal_log(f"Video YOLO tespiti [{target_id}]: {type_tr} — güven %{int(conf*100)}", "INFO")
+
+        if self.active_camera_mode == "video":
+            self.live_detections = self.video_live_detections
+            self.detection_log = self.video_detection_log
+            self._track_rows = self.video_track_rows
+            if changed:
+                self.update_detections_table()
+                QTimer.singleShot(100, self.update_vlm_from_log)
 
     def closeEvent(self, event):
         # Kamera yayınını durdur
         if hasattr(self, "camera_thread") and self.camera_thread is not None:
             self.camera_thread.stop()
+
+        # Canlı video (drone.mp4) thread'ini durdur
+        if getattr(self, "video_yolo_thread", None) is not None:
+            self.video_yolo_thread.stop()
 
         # MCP araç sunucusunu durdur
         if getattr(self, "mcp_client", None) is not None:

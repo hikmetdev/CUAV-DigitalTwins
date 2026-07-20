@@ -87,9 +87,15 @@ class McpClient:
     # ------------------------------------------------------------------
     # MCP işlemleri
     # ------------------------------------------------------------------
-    def list_tools(self):
-        """Sunucudaki araç tanımlarını döndürür: [{name, description, inputSchema}]."""
-        return self._request("tools/list", {}).get("tools", [])
+    def list_tools(self, categories=None):
+        """Sunucudaki araç tanımlarını döndürür: [{name, description, inputSchema}].
+        categories verilirse (ör. ['telemetry', 'yolo']) yalnızca o kategorideki
+        araçlar döner — böylece AI Copilot her sorguda 14 aracın tamamını değil
+        göreve uygun alt kümeyi görür (Görev 3). None ise tüm araçlar döner."""
+        params = {}
+        if categories:
+            params["categories"] = list(categories)
+        return self._request("tools/list", params).get("tools", [])
 
     def call_tool(self, name, arguments=None):
         """Aracı çağırır; sonucun text içeriğini JSON olarak çözüp döndürür."""

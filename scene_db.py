@@ -1,7 +1,7 @@
 """Arayüzde gösterilen sahne özetinin (VLM paneli) SQLite kaydı.
 
 GCS'deki "SAHNE ANALİZİ (CANLI)" kutusunda gösterilen her özet, uçuşa özel bir
-SQLite dosyasına da yazılır: database/build_YYYYMMDD_HHMMSS.db — dosya adı o
+SQLite dosyasına da yazılır: database/build_YYYYMMDD_HHMMSS.sqlite — dosya adı o
 koşunun log klasörüyle (logs/build_...) birebir aynıdır, böylece log ile
 veritabanı eşlenir.
 
@@ -44,7 +44,7 @@ class SceneDatabase:
 
     def __init__(self, database_dir, build_name):
         os.makedirs(database_dir, exist_ok=True)
-        self.path = os.path.join(database_dir, f"{build_name}.db")
+        self.path = os.path.join(database_dir, f"{build_name}.sqlite")
         self.conn = sqlite3.connect(self.path)
         self.conn.execute(_SCHEMA)
         self.conn.commit()

@@ -155,6 +155,27 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "change_speed",
+        "description": "Uçuş hızını değiştirir (hedef HAVA hızı, m/s). 'hızı 15 yap' için "
+                       "target_speed_ms=15; '3 m/s hızlan' için change_ms=3, 'yavaşla' için "
+                       "change_ms=-3 kullan (ikisinden birini ver). Güvenlik için 10-22 m/s "
+                       "aralığına sıkıştırılır. Rotayı ve modu DEĞİŞTİRMEZ: uçak mevcut "
+                       "hedefine/otonom rotasına yeni hızla devam eder.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target_speed_ms": {
+                    "type": "number",
+                    "description": "Hedef hava hızı (m/s).",
+                },
+                "change_ms": {
+                    "type": "number",
+                    "description": "Mevcut hıza eklenecek fark (pozitif=hızlan, negatif=yavaşla).",
+                },
+            },
+        },
+    },
+    {
         "name": "change_altitude",
         "description": "Uçuş irtifasını değiştirir; uçak mevcut yönünde düz uçmaya devam "
                        "ederken yeni irtifaya tırmanır/alçalır. 'irtifayı 30 metreye çıkar' "
@@ -174,7 +195,55 @@ TOOLS = [
             },
         },
     },
+    {
+        "name": "start_flight",
+        "description": "Uçağı pistten havalandırıp otonom görev uçuşuna başlatır. Operatör 'uçak uçmaya hazır', "
+                       "'kalkışa geç', 'uçuşa başla', 'uçağı kaldır', 'havalan' vb. dediğinde bu aracı çağır.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]
+
+
+# ----------------------------------------------------------------------
+# ARAÇ KATEGORİLERİ (Görev 3): araçları görev alanına göre gruplar.
+# ----------------------------------------------------------------------
+# tools/list bir 'categories' süzgeci alırsa yalnızca o kategori(ler)deki
+# araçlar döner; böylece AI Copilot her sorguda 14 aracın tamamını değil,
+# göreve uygun küçük bir alt küme görür (daha kısa istem = daha hızlı yanıt,
+# daha az araç karışıklığı). İstemci (mcp_client) yerel yönlendiriciden
+# (copilot_router) gelen kategorileri buraya iletir.
+#   telemetry : anlık/geçmiş uçuş durumu (irtifa, hız, batarya, konum...)
+#   yolo      : YOLO tespitleri + VLM sahne (hedefler, kutular, QR...)
+#   analysis  : birleşik durum özeti (telemetri + tespit + VLM tek çağrıda)
+#   report    : taktik rapor derleme (GUI kaydetme penceresi açar)
+#   flight    : uçağı gerçekten yönlendiren komutlar (dön/ileri/irtifa/hız...)
+TOOL_CATEGORIES = {
+    "get_telemetry": "telemetry",
+    "get_telemetry_history": "telemetry",
+    "get_battery_status": "telemetry",
+    "get_detections": "yolo",
+    "get_detection_history": "yolo",
+    "get_vlm_scene": "yolo",
+    "get_situation_summary": "analysis",
+    "generate_tactical_report": "report",
+    "turn_heading": "flight",
+    "fly_forward": "flight",
+    "return_to_start": "flight",
+    "resume_route": "flight",
+    "change_speed": "flight",
+    "change_altitude": "flight",
+    "start_flight": "flight",
+}
+
+
+def _tools_for(categories):
+    """İstenen kategori(ler)deki araç tanımlarını döndürür. categories boş/None
+    ise tüm araçlar döner (geriye dönük uyum). Bilinmeyen kategori sessizce
+    yok sayılır."""
+    if not categories:
+        return TOOLS
+    wanted = set(categories)
+    return [t for t in TOOLS if TOOL_CATEGORIES.get(t["name"]) in wanted]
 
 
 # ----------------------------------------------------------------------
@@ -186,6 +255,10 @@ FLIGHT_MIN_ALT_M = 10.0
 FLIGHT_MAX_ALT_M = 120.0
 FLIGHT_MIN_FWD_M = 50.0     # sabit kanat için daha yakın hedef anlamsız (loiter yarıçapı ~60 m)
 FLIGHT_MAX_FWD_M = 2000.0
+# Hız sınırları: SITL varsayılan ArduPlane bandı (AIRSPEED_MIN=9 / AIRSPEED_MAX=22);
+# alt sınır stall payı için 10'a çekildi. Otopilot bu bandın dışını zaten kırpar.
+FLIGHT_MIN_SPEED_MS = 10.0
+FLIGHT_MAX_SPEED_MS = 22.0
 # Dönüş/irtifa komutlarında uçağın "düz devam" hedefi bu kadar ileriye konur;
 # siha_control'un aim-ahead mantığıyla aynı fikir (yakın hedef = erken loiter).
 FLIGHT_AIM_AHEAD_M = 3000.0
@@ -202,16 +275,18 @@ class FlightCommander:
 
     def __init__(self):
         import rclpy
-        from mavros_msgs.srv import CommandInt, SetMode
+        from mavros_msgs.srv import CommandInt, CommandLong, SetMode
         from std_msgs.msg import String as RosString
         if not rclpy.ok():
             rclpy.init(args=None)
         self._rclpy = rclpy
         self._CommandInt = CommandInt
+        self._CommandLong = CommandLong
         self._SetMode = SetMode
         self._RosString = RosString
         self.node = rclpy.create_node("mcp_flight_commander")
         self.cmd_int_cli = self.node.create_client(CommandInt, "/mavros/cmd/command_int")
+        self.cmd_long_cli = self.node.create_client(CommandLong, "/mavros/cmd/command")
         self.set_mode_cli = self.node.create_client(SetMode, "/mavros/set_mode")
         self.override_pub = self.node.create_publisher(RosString, "/siha/operator_override", 10)
 
@@ -250,6 +325,19 @@ class FlightCommander:
         res = self._call(self.cmd_int_cli, req)
         if not res.success:
             raise RuntimeError(f"DO_REPOSITION reddedildi (MAV_RESULT={res.result}).")
+
+    def set_speed(self, speed_ms):
+        """Hedef hava hızını değiştirir (MAV_CMD_DO_CHANGE_SPEED). Modu ve
+        hedefi değiştirmediği için operator_override yayınlanmaz: otonom rota
+        izleme (AUTO/GUIDED fark etmez) yeni hızla sürer."""
+        req = self._CommandLong.Request()
+        req.command = 178    # MAV_CMD_DO_CHANGE_SPEED
+        req.param1 = 0.0     # hız tipi: 0 = hava hızı (airspeed)
+        req.param2 = float(speed_ms)
+        req.param3 = -1.0    # gaz: otopilot ayarlasın (değişiklik yok)
+        res = self._call(self.cmd_long_cli, req)
+        if not res.success:
+            raise RuntimeError(f"DO_CHANGE_SPEED reddedildi (MAV_RESULT={res.result}).")
 
 
 _flight_commander = None
@@ -397,6 +485,10 @@ def _telemetry_history(window_seconds=None):
 
 
 def _det_row(d):
+    # Video tespitlerinin GPS'i yoktur (lat/lon None) → round None'a çökmesin;
+    # koordinat alanları None kalır ve 'source' etiketi kaynağı belli eder.
+    lat = d.get("lat")
+    lon = d.get("lon")
     return {
         "id": d.get("id"),
         "type": d.get("type"),
@@ -404,10 +496,12 @@ def _det_row(d):
         "first_seen": d.get("first_time"),
         "last_seen": d.get("time"),
         "frames_confirmed": d.get("hits", 1),
-        "lat": round(d.get("lat", 0.0), 5),
-        "lon": round(d.get("lon", 0.0), 5),
+        "lat": round(lat, 5) if lat is not None else None,
+        "lon": round(lon, 5) if lon is not None else None,
         "alt_m": round(d["alt"], 1) if d.get("alt") is not None else None,
         "qr_text": d.get("qr_text"),
+        # "video" = drone.mp4 üzerinde tespit (GPS yok); yoksa uçuş tespiti.
+        "source": d.get("source", "flight"),
     }
 
 
@@ -536,6 +630,32 @@ def execute_tool(name, args):
             "ui_payload": {"label": f"AI Uçuş Komutu: {distance:.0f} m ileri"},
         }
 
+    if name == "change_speed":
+        current = float(tel.get("speed", 0.0))
+        if args.get("target_speed_ms") is not None:
+            requested = float(args["target_speed_ms"])
+        elif args.get("change_ms") is not None:
+            # Taban telemetri yer hızıdır (hava hızı sensörü yok); rüzgârsız
+            # SITL'de ikisi ~eşittir, fark operatöre yansıtılmaz.
+            requested = current + float(args["change_ms"])
+        else:
+            return {"error": "target_speed_ms veya change_ms parametrelerinden biri gerekli."}
+        new_speed = _clamp(requested, FLIGHT_MIN_SPEED_MS, FLIGHT_MAX_SPEED_MS)
+        _get_flight_commander().set_speed(new_speed)
+        clamp_note = ""
+        if requested != new_speed:
+            clamp_note = (f" (istenen {requested:.0f} m/s güvenlik aralığına sıkıştırıldı: "
+                          f"{FLIGHT_MIN_SPEED_MS:.0f}-{FLIGHT_MAX_SPEED_MS:.0f} m/s)")
+        return {
+            "status": f"Komut gönderildi: hedef hava hızı {new_speed:.0f} m/s "
+                      f"(mevcut ~{current:.0f} m/s).{clamp_note} Rota ve mod "
+                      "değişmedi; uçak mevcut hedefine yeni hızla devam ediyor.",
+            "previous_speed_ms": round(current, 1),
+            "new_speed_ms": round(new_speed, 1),
+            "ui_action": "timeline_event",
+            "ui_payload": {"label": f"AI Uçuş Komutu: hız {new_speed:.0f} m/s"},
+        }
+
     if name == "change_altitude":
         lat, lon, heading, alt, mode = _flight_state()
         if args.get("target_altitude_m") is not None:
@@ -631,6 +751,13 @@ def execute_tool(name, args):
             },
         }
 
+    if name == "start_flight":
+        return {
+            "status": "Otonom uçuş ve otomatik pist kalkış komutu tetiklendi.",
+            "ui_action": "start_flight",
+            "ui_payload": {"label": "AI Uçuş Komutu: Uçuşa Geç / Kalkış"},
+        }
+
     raise KeyError(f"Bilinmeyen araç: {name}")
 
 
@@ -672,7 +799,9 @@ def handle_message(msg):
         return _response(req_id, {})
 
     if method == "tools/list":
-        return _response(req_id, {"tools": TOOLS})
+        # İstemci 'categories' verirse araçları o alana daralt (Görev 3);
+        # vermezse tüm araçlar döner.
+        return _response(req_id, {"tools": _tools_for(params.get("categories"))})
 
     if method == "tools/call":
         name = params.get("name", "")

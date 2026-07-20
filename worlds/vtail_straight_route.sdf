@@ -114,7 +114,7 @@
            2x'te siluet insan gozune apacik bir otomobil yan profili (tekerlekler
            dahil) oldugu halde model ateslemiyor => sinir render/olcek degil,
            modelin kavraminda. Cozum model tarafinda (nadir goruntulerle
-           fine-tune, eval/train_yolo.py).
+           fine-tune gerektirir; boyle bir egitim hatti su an repoda yok).
          * 2026-07-17 GUNCELLEME-3: otomobil yerine ESKI DAF cekici (kamyon)
            yan yatik olarak rotaya kondu (route_truck_side_1, T-05). Bkz. o
            modelin yanindaki not: gorsel/dekor amacli; yolo.py'nin default
