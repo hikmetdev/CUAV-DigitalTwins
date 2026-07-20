@@ -1,6 +1,7 @@
 # Ortam / gizli anahtarlar
 config/.env
 .env
+.claude/
 
 # Python
 __pycache__/
