@@ -26,3 +26,6 @@ runs/
 # Veriseti içeriği (iskelet + data.yaml korunur)
 dataset/images/
 dataset/labels/
+
+# Yerel video kaynağı (drone.mp4) — büyük medya, depoya girmez.
+drone.mp4
