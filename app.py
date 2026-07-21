@@ -85,7 +85,8 @@ from PySide6.QtWidgets import (
 )
 from styles import DARK_THEME_QSS
 from interface import (CompassWidget, CameraSimulatorWidget, TimelineWidget,
-                       TacticalMapWidget, McpWorkflowTrackerWidget, TelemetryChartsPanel)
+                       TacticalMapWidget, McpWorkflowTrackerWidget, TelemetryChartsPanel,
+                       TacticalReportPdf)
 from threads import (CameraStreamThread, TelemetryStreamThread, DetectionStreamThread,
                      GeminiChatThread, VideoYoloThread, McpClient, McpError)
 from scene_db import SceneDatabase
@@ -189,6 +190,10 @@ class GroundControlStation(QMainWindow):
         self.takeoff_start_ts = None
         self.flight_started = False
         self.telemetry_history = deque(maxlen=1800)
+        # Kat edilen toplam yol (m) ve son GPS sabiti — bkz.
+        # update_travelled_distance. Düz çizgi uzaklığı DEĞİL, adım adım birikir.
+        self.travel_m = 0.0
+        self._last_travel_fix = None
 
         self.detections = []
         self.waypoints = [{"lat": START_LAT, "lon": START_LON, "name": "START"}] + [
@@ -626,6 +631,9 @@ class GroundControlStation(QMainWindow):
         
         # Battery Card
         bat_widget = QWidget()
+        # Kart kenar çizgisi de doluluk kademesiyle birlikte renklenir (bkz.
+        # update_telemetry_loop → BATTERY_TIERS), bu yüzden referansı saklanır.
+        self.bat_card = bat_widget
         bat_widget.setStyleSheet("background-color:#0d1522; border-radius:4px; border-left: 3px solid #10b981;")
         bat_lyt = QVBoxLayout(bat_widget)
         bat_lyt.setContentsMargins(10, 6, 10, 6)
@@ -912,13 +920,59 @@ class GroundControlStation(QMainWindow):
     def setup_map_initial_waypoints(self):
         self.map_view.set_waypoints(self.waypoints)
 
+    # Batarya doluluk kademeleri: (alt sınır %, renk, yazı eki). Yukarıdan aşağı
+    # ilk eşleşen kademe uygulanır. Kamera HUD'ı ve telemetri kartı aynı eşikleri
+    # kullanır ki operatör iki yerde farklı renk görmesin.
+    BATTERY_TIERS = (
+        (80, "#10b981", ""),            # Yeşil  — güvenli
+        (60, "#facc15", ""),            # Sarı   — izlenmeli
+        (20, "#f97316", " [DÜŞÜK]"),    # Turuncu— düşük
+        (0,  "#ef4444", " [ALARM]"),    # Kırmızı— kritik
+    )
+
+    @classmethod
+    def battery_tier(cls, percent):
+        """Doluluk yüzdesine karşılık gelen (renk, yazı eki) çiftini döner."""
+        for threshold, color, suffix in cls.BATTERY_TIERS:
+            if percent >= threshold:
+                return color, suffix
+        return cls.BATTERY_TIERS[-1][1], cls.BATTERY_TIERS[-1][2]
+
+    # Kat edilen mesafe (kilometre sayacı) eşikleri:
+    #  - alt sınır: duran uçakta GPS gürültüsü (birkaç cm/örnek) yol gibi birikip
+    #    sayaç kendi kendine artmasın;
+    #  - üst sınır: EKF/GPS ilk kilitlenmesindeki sıçrama tek adımda yüzlerce
+    #    metre eklemesin. yolo.py'deki travel_m ile aynı mantık.
+    TRAVEL_MIN_STEP_M = 0.5
+    TRAVEL_MAX_STEP_M = 100.0
+
+    def update_travelled_distance(self):
+        """KAT EDİLEN toplam yolu (m, tamsayı) döner ve biriktirir.
+
+        Eskiden başlangıç noktasına olan DÜZ ÇİZGİ uzaklığı gösteriliyordu: uçak
+        geri döndüğünde 'kat edilen mesafe' azalıyordu. Artık ardışık GPS
+        örnekleri arasındaki adımlar toplanır — kilometre sayacı gibi yalnızca
+        artar, rota geri dönse de doğru kalır."""
+        lat = self.telemetry.get("lat")
+        lon = self.telemetry.get("lon")
+        if lat is None or lon is None:
+            return int(self.travel_m)
+        prev = self._last_travel_fix
+        self._last_travel_fix = (lat, lon)
+        if prev is None:
+            return int(self.travel_m)
+        d_lat = (lat - prev[0]) * 111000.0
+        d_lon = (lon - prev[1]) * 111000.0 * math.cos(math.radians(lat))
+        step = math.sqrt(d_lat * d_lat + d_lon * d_lon)
+        if self.TRAVEL_MIN_STEP_M <= step <= self.TRAVEL_MAX_STEP_M:
+            self.travel_m += step
+        return int(self.travel_m)
+
     def update_telemetry_loop(self):
         # 1. Update clock
         self.clock_label.setText(datetime.now().strftime("%H:%M:%S"))
 
-        d_lat = (self.telemetry["lat"] - START_LAT) * 111000.0
-        d_lon = (self.telemetry["lon"] - START_LON) * 111000.0 * math.cos(math.radians(START_LAT))
-        dist_m = int(math.sqrt(d_lat**2 + d_lon**2))
+        dist_m = self.update_travelled_distance()
 
         # 1b. AI Copilot geçmiş telemetri tamponu (saniyede bir örnek).
         self.telemetry_history.append({
@@ -943,18 +997,27 @@ class GroundControlStation(QMainWindow):
         self.lbl_speed.setText(f"HIZ (VELOCITY): <span style='color:#06b6d4; font-weight:bold;'>{self.telemetry['speed']:.1f} m/s</span>")
         
         rounded_bat = int(self.telemetry["battery"])
-        self.lbl_battery.setText(f"BATARYA (BAT): <span style='color:#10b981; font-weight:bold;'>{rounded_bat}%</span> ({self.telemetry['voltage']} V)")
         self.bar_battery.setValue(rounded_bat)
-        
-        # Battery low alerts styling
-        if rounded_bat < 20:
-            self.lbl_battery.setText(f"BATARYA (BAT): <span style='color:#ef4444; font-weight:bold;'>{rounded_bat}% [ALARM]</span>")
-            self.bar_battery.setStyleSheet("QProgressBar { background-color: #030712; border-radius: 2px; } QProgressBar::chunk { background-color: #ef4444; }")
-        elif rounded_bat < 50:
-            self.bar_battery.setStyleSheet("QProgressBar { background-color: #030712; border-radius: 2px; } QProgressBar::chunk { background-color: #f59e0b; }")
-        else:
-            self.bar_battery.setStyleSheet("QProgressBar { background-color: #030712; border-radius: 2px; } QProgressBar::chunk { background-color: #10b981; }")
-            
+
+        # Batarya kademesi: doluluk düştükçe hem yazı, hem çubuk, hem kart kenar
+        # çizgisi aynı renge geçer. Eskiden %50'nin üstündeki HER değer yeşil
+        # yandığı için %60'ta hâlâ "tam dolu" izlenimi veriyordu; artık %70'in
+        # altında sarıya, %40'ın altında turuncuya, %20'nin altında kırmızıya döner.
+        bat_color, bat_suffix = self.battery_tier(rounded_bat)
+        self.lbl_battery.setText(
+            f"BATARYA (BAT): <span style='color:{bat_color}; font-weight:bold;'>"
+            f"{rounded_bat}%{bat_suffix}</span> ({self.telemetry['voltage']} V)"
+        )
+        self.bar_battery.setStyleSheet(
+            "QProgressBar { background-color: #030712; border-radius: 2px; } "
+            f"QProgressBar::chunk {{ background-color: {bat_color}; }}"
+        )
+        if hasattr(self, "bat_card"):
+            self.bat_card.setStyleSheet(
+                f"background-color:#0d1522; border-radius:4px; border-left: 3px solid {bat_color};"
+            )
+
+
         mode_color = "#ef4444" if self.telemetry["mode"] == "DISCONNECTED" else "#f59e0b"
         self.lbl_mode.setText(f"UÇUŞ MODU: <span style='color:{mode_color}; font-weight:bold;'>{self.telemetry['mode']}</span>")
 
@@ -977,11 +1040,7 @@ class GroundControlStation(QMainWindow):
             elapsed_sec = 0
 
         mins, secs = divmod(elapsed_sec, 60)
-        
-        d_lat = (self.telemetry["lat"] - START_LAT) * 111000.0
-        d_lon = (self.telemetry["lon"] - START_LON) * 111000.0 * math.cos(math.radians(START_LAT))
-        dist_m = int(math.sqrt(d_lat**2 + d_lon**2))
-        
+
         self.lbl_flight_dist.setText(
             f"UÇUŞ SÜRESİ: <span style='color:#06b6d4; font-weight:bold;'>{mins:02d}:{secs:02d}</span> | "
             f"MESAFE: <span style='color:#f59e0b; font-weight:bold;'>{dist_m} m</span>"
@@ -1010,6 +1069,42 @@ class GroundControlStation(QMainWindow):
                 self.telemetry["lat"], self.telemetry["lon"], self.telemetry["heading"],
                 self.telemetry["mode"], self.telemetry["alt"], self.telemetry["speed"],
             )
+
+        # drone.mp4 akışı gerçek bir uçuşun kaydı; ekrandaki SITL telemetrisiyle
+        # ilgisi yok. Yan yana gösterilince "bu videonun verisi" sanıldığı için
+        # video modunda panel ve grafikler boşaltılır. Yukarıdaki hesaplar
+        # (geçmiş tamponu, uçuş sayacı, harita, Copilot) aynen sürer; Gazebo'ya
+        # dönüldüğünde panel bir sonraki tik'te kendi verisiyle geri dolar.
+        if getattr(self, "active_camera_mode", "gazebo") == "video":
+            self._blank_telemetry_ui()
+
+    # Veri yokken telemetri kartlarında gösterilen yer tutucu.
+    TELEMETRY_PLACEHOLDER = "<span style='color:#64748b; font-weight:bold;'>---</span>"
+
+    def _blank_telemetry_ui(self):
+        """Telemetri sekmesindeki tüm sayısal alanları ve 2x2 grafik panelini
+        boşaltır (video akışı aktifken kullanılır)."""
+        ph = self.TELEMETRY_PLACEHOLDER
+        self.lbl_alt.setText(f"İRTİFA (ALT): {ph}")
+        self.lbl_speed.setText(f"HIZ (VELOCITY): {ph}")
+        self.lbl_battery.setText(f"BATARYA (BAT): {ph}")
+        self.bar_battery.setValue(0)
+        self.bar_battery.setStyleSheet(
+            "QProgressBar { background-color: #030712; border-radius: 2px; } "
+            "QProgressBar::chunk { background-color: #334155; }"
+        )
+        if hasattr(self, "bat_card"):
+            self.bat_card.setStyleSheet(
+                "background-color:#0d1522; border-radius:4px; border-left: 3px solid #334155;"
+            )
+        self.lbl_mode.setText(f"UÇUŞ MODU: {ph}")
+        self.lbl_heading.setText(f"YÖNELİM: {ph}")
+        self.compass_widget.set_heading(0)
+        self.lbl_gps.setText(f"GPS KOORDİNAT:<br>{ph}")
+        self.lbl_flight_dist.setText(f"UÇUŞ SÜRESİ: {ph} | MESAFE: {ph}")
+        if hasattr(self, "telemetry_chart"):
+            # Boş geçmiş → grafikler "Veri bekleniyor..." durumuna döner.
+            self.telemetry_chart.set_history([])
 
     # ------------------------------------------------------------------
     # YOLO TESPİTLER & HARİTA ETKİLEŞİMİ
@@ -1120,11 +1215,17 @@ class GroundControlStation(QMainWindow):
             return
         now = time.time()
         now_str = datetime.now().strftime("%H:%M:%S")
-        lat = self.telemetry["lat"]
-        lon = self.telemetry["lon"]
+        uav_lat = self.telemetry["lat"]
+        uav_lon = self.telemetry["lon"]
         alt = self.telemetry.get("alt")
         changed = False
         for d in dets:
+            # yolo.py artık her hedefin KENDİ yer koordinatını gönderiyor
+            # (bbox merkezinin geo-projeksiyonu). Yoksa (irtifa/GPS yok, eski
+            # sürüm) eskisi gibi İHA konumuna düşülür — haritada hepsi uçuş
+            # hattının üstünde birikir ama hiçbir şey kırılmaz.
+            lat = d.get("lat") if d.get("lat") is not None else uav_lat
+            lon = d.get("lon") if d.get("lon") is not None else uav_lon
             cls = d.get("cls", "?")
             conf = float(d.get("conf", 0.0))
             track_id = d.get("track_id")
@@ -1700,19 +1801,78 @@ class GroundControlStation(QMainWindow):
         report_content += f"\"{self.vlm_text_box.toPlainText()}\"\n"
         report_content += f"--------------------- END OF REPORT ---------------------\n"
         
-        # Save dialog
-        default_name = f"Taktik_Rapor_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.txt"
-        file_path, _ = QFileDialog.getSaveFileName(
-            self, "Taktik Rapor Kaydet", default_name, "Text Files (*.txt);;All Files (*)"
+        # Save dialog — varsayılan biçim GÖRSELLEŞTİRİLMİŞ PDF; düz metin
+        # (ham veri, tam tespit listesi) seçenek olarak korunur. Raporlar proje
+        # kökündeki reports/ klasöründe toplanır (kullanıcı pencereden başka bir
+        # yer seçebilir).
+        default_name = os.path.join(
+            self._reports_dir(),
+            f"Taktik_Rapor_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.pdf",
         )
-        
-        if file_path:
+        file_path, selected_filter = QFileDialog.getSaveFileName(
+            self, "Taktik Rapor Kaydet", default_name,
+            "PDF Raporu (*.pdf);;Text Files (*.txt);;All Files (*)"
+        )
+        if not file_path:
+            return
+
+        # Uzantı yoksa seçilen filtreye göre tamamla.
+        if not os.path.splitext(file_path)[1]:
+            file_path += ".txt" if "txt" in (selected_filter or "").lower() else ".pdf"
+
+        if file_path.lower().endswith(".pdf"):
             try:
-                with open(file_path, "w", encoding="utf-8") as f:
-                    f.write(report_content)
-                self.add_terminal_log(f"Rapor başarıyla diske yazıldı: {os.path.basename(file_path)}", "INFO")
+                pages = TacticalReportPdf(self._build_report_data()).save(file_path)
+                self.add_terminal_log(
+                    f"Görselleştirilmiş PDF raporu yazıldı ({pages} sayfa): "
+                    f"{os.path.basename(file_path)}", "INFO"
+                )
             except Exception as e:
-                self.add_terminal_log(f"Rapor dosyası kaydedilemedi: {str(e)}", "WARN")
+                # PDF üretimi başarısızsa görev raporsuz kalmasın: yanına metin
+                # sürümünü yaz ve kullanıcıyı bilgilendir.
+                self.add_terminal_log(f"PDF raporu oluşturulamadı: {e} — metin sürümü yazılıyor.", "WARN")
+                txt_path = os.path.splitext(file_path)[0] + ".txt"
+                try:
+                    with open(txt_path, "w", encoding="utf-8") as f:
+                        f.write(report_content)
+                    self.add_terminal_log(f"Metin raporu yazıldı: {os.path.basename(txt_path)}", "INFO")
+                except Exception as e2:
+                    self.add_terminal_log(f"Rapor dosyası kaydedilemedi: {e2}", "WARN")
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(report_content)
+            self.add_terminal_log(f"Rapor başarıyla diske yazıldı: {os.path.basename(file_path)}", "INFO")
+        except Exception as e:
+            self.add_terminal_log(f"Rapor dosyası kaydedilemedi: {str(e)}", "WARN")
+
+    def _reports_dir(self):
+        """Raporların toplandığı proje kökündeki reports/ klasörü; yoksa oluşturur.
+        Oluşturulamazsa (izin vb.) proje köküne düşer, rapor kaydı hiç engellenmez."""
+        path = os.path.join(BASE_DIR, "reports")
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            self.add_terminal_log(f"reports/ klasörü oluşturulamadı ({e}); proje kökü kullanılacak.", "WARN")
+            return BASE_DIR
+        return path
+
+    def _build_report_data(self):
+        """PDF çizicisinin (interface/rapor.py) beklediği veri sözlüğünü derler.
+        Uygulama durumunun anlık bir KOPYASIDIR; çizim sırasında canlı yapılar
+        değişse bile rapor tutarlı kalır."""
+        return {
+            "generated_at": datetime.now(),
+            "mission_min": (time.time() - self.mission_start_ts) / 60.0,
+            "camera_mode": getattr(self, "active_camera_mode", "gazebo"),
+            "telemetry": dict(self.telemetry),
+            "history": [dict(s) for s in self.telemetry_history],
+            "detections": [dict(d) for d in (self.detection_log or self.live_detections)],
+            "timeline": [dict(e) for e in getattr(self, "timeline_events", [])],
+            "waypoints": [dict(w) for w in getattr(self, "waypoints", [])],
+            "vlm": self.vlm_text_box.toPlainText(),
+        }
 
     # ------------------------------------------------------------------
     # CAMERA STREAM CONNECTOR
@@ -1974,7 +2134,7 @@ class GroundControlStation(QMainWindow):
         self.stop_camera_stream()
 
         self.video_yolo_thread = VideoYoloThread(video_path=video_file, parent=self)
-        self.video_yolo_thread.frame_received.connect(self.camera_sim.set_frame)
+        self.video_yolo_thread.frame_received.connect(self._on_video_frame)
         self.video_yolo_thread.stream_started.connect(self._on_video_yolo_started)
         self.video_yolo_thread.load_failed.connect(self._on_video_yolo_failed)
         self.video_yolo_thread.detections_ready.connect(self.handle_video_detections)
@@ -1984,6 +2144,15 @@ class GroundControlStation(QMainWindow):
             lambda msg, lvl: self.camera_status(msg, "WARN" if lvl == "WARN" else "INFO")
         )
         self.video_yolo_thread.start()
+
+    def _on_video_frame(self, q_img):
+        """Video karesini ekrana basar ve thread'in geri-basınç sayacını düşürür.
+        Sayaç sayesinde arayüz yoğunken video thread'i kare yayınlamayı keser;
+        aksi halde Qt kuyruğunda kare birikip görüntü giderek geriden geliyordu."""
+        self.camera_sim.set_frame(q_img)
+        th = getattr(self, "video_yolo_thread", None)
+        if th is not None:
+            th.frame_consumed()
 
     def _on_video_yolo_started(self):
         self.active_camera_mode = "video"
@@ -1997,6 +2166,9 @@ class GroundControlStation(QMainWindow):
         )
         self.update_detections_table()
         self.update_vlm_from_log()
+        # Telemetriyi 1 sn'lik tik'i beklemeden hemen boşalt (video karesiyle
+        # birlikte eski SITL değerleri bir an ekranda kalmasın).
+        self._blank_telemetry_ui()
         self.btn_video_toggle.setEnabled(True)
         self.camera_sim.clear_status()
         self.camera_sim.set_source_label("VİDEO", busy=False)

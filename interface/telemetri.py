@@ -82,6 +82,29 @@ class TelemetryChartsPanel(QWidget):
         self.history = list(history)[-60:] # Son 60 saniyelik veri
         self.update()
 
+    def _draw_value_badge(self, painter, x_right, y_top, text, color):
+        """Güncel değeri, çizginin/ızgaranın üstüne binip okunmaz hale gelmesin
+        diye koyu zeminli bir rozet içinde yazar: dolu koyu arka plan + seri
+        renginde ince kenarlık + yüksek kontrastlı açık gri metin.
+        (x_right, y_top) rozetin SAĞ-ÜST köşesidir."""
+        painter.setFont(QFont("Roboto Mono", 8, QFont.Bold))
+        fm = painter.fontMetrics()
+        tw = fm.horizontalAdvance(text)
+        th = fm.height()
+        pad_x, pad_y = 5, 2
+        bw = tw + pad_x * 2
+        bh = th + pad_y * 2
+        bx = int(x_right - bw)
+        by = int(y_top)
+
+        painter.setBrush(QBrush(QColor(3, 7, 18, 235)))   # #030712, neredeyse opak
+        painter.setPen(QPen(QColor(color), 1))
+        painter.drawRoundedRect(bx, by, bw, bh, 3, 3)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QColor("#f8fafc"))                  # kırık beyaz metin
+        painter.drawText(bx + pad_x, by + pad_y + fm.ascent(), text)
+
     def _draw_sub_chart(self, painter, rect, title, values_or_series, color_spec, unit, default_max=10.0, min_y=0.0):
         x0, y0, w, h = rect.x(), rect.y(), rect.width(), rect.height()
 
@@ -120,11 +143,6 @@ class TelemetryChartsPanel(QWidget):
             min_val = min(min_y, min(values))
             val_range = max(1.0, max_val - min_val)
 
-            # Güncel değer metni (sağ üst)
-            last_val = values[-1]
-            val_str = f"{last_val:.1f}{unit}" if isinstance(last_val, float) else f"{last_val}{unit}"
-            painter.drawText(x0 + w - 70, y0 + 16, val_str)
-
             # Çizgi çizimi
             painter.setPen(QPen(QColor(main_color), 1.8))
             for i in range(n - 1):
@@ -133,6 +151,12 @@ class TelemetryChartsPanel(QWidget):
                 px2 = x0 + 8 + (i + 1) * dx
                 py2 = y0 + h - 6 - ((values[i + 1] - min_val) / val_range) * (h - 26)
                 painter.drawLine(int(px1), int(py1), int(px2), int(py2))
+
+            # Güncel değer rozeti EN SON çizilir ki veri çizgisi üstünden geçip
+            # rakamları bölmesin (rozet zemini opak).
+            last_val = values[-1]
+            val_str = f"{last_val:.1f}{unit}" if isinstance(last_val, float) else f"{last_val}{unit}"
+            self._draw_value_badge(painter, x0 + w - 6, y0 + 4, val_str, main_color)
         else:
             # Çok renkli seri
             all_vals = []
@@ -144,10 +168,6 @@ class TelemetryChartsPanel(QWidget):
             min_val = min(min(all_vals) if all_vals else min_y, min_y)
             val_range = max(1.0, max_val - min_val)
 
-            last_val = float(self.history[-1].get(color_spec[0][0], 0.0))
-            painter.setPen(QColor(color_spec[0][2]))
-            painter.drawText(x0 + w - 70, y0 + 16, f"{last_val:.0f}{unit}")
-
             for key, lbl, col in color_spec:
                 vals = [float(s.get(key, 0.0)) for s in self.history]
                 painter.setPen(QPen(QColor(col), 1.5))
@@ -157,6 +177,10 @@ class TelemetryChartsPanel(QWidget):
                     px2 = x0 + 8 + (i + 1) * dx
                     py2 = y0 + h - 6 - ((vals[i + 1] - min_val) / val_range) * (h - 26)
                     painter.drawLine(int(px1), int(py1), int(px2), int(py2))
+
+            # Güncel değer rozeti çizgilerin üstüne (opak zemin, okunur rakam).
+            last_val = float(self.history[-1].get(color_spec[0][0], 0.0))
+            self._draw_value_badge(painter, x0 + w - 6, y0 + 4, f"{last_val:.0f}{unit}", color_spec[0][2])
 
     def paintEvent(self, event):
         painter = QPainter(self)

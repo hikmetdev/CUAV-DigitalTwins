@@ -13,6 +13,9 @@ logs/
 # Uçuş başına sahne özeti veritabanları (scene_db.py üretir)
 database/
 
+# Üretilen taktik raporlar (PDF/metin) — çıktı, kaynak değil.
+reports/
+
 # Model ağırlıkları — büyük binary dosyalar, git'e girmemeli.
 # Bunlar proje kökünde kalmak zorunda: yolo.py modeli göreli yolla yükler ve
 # ultralytics MobileCLIP'i çalışma dizininden okur (app.py cwd'yi BASE_DIR'e sabitler).

@@ -4,6 +4,7 @@ import os
 import time
 import json
 import math
+from collections import deque
 from datetime import datetime, timezone, timedelta
 from typing import List, Literal, Optional, Tuple
 
@@ -85,6 +86,29 @@ YOLO_CAM_HFOV = float(os.environ.get("YOLO_CAM_HFOV", "1.3962634"))
 # YOLO_MAX_BBOX_FRAC'tan çok daha keskin: 15 m'de %40 kare hâlâ ~12 m'lik bir
 # kutuya izin verirken (build_20260717_103118 frame 95: box:0.40 = 8.8x11.5 m
 # sahte pozitif geçmişti) bu kapı onu eler.
+# --- Hedef yer koordinatı (geo-projeksiyon) ---
+# Nadir kamerada bbox merkezi, irtifa+FOV+yön bilindiği için YERDE bir noktaya
+# düşürülebilir. Eskiden her tespite İHA'nın kendi GPS'i yazılıyordu: haritada
+# bütün hedefler uçuş hattının üstünde birikiyordu (yanal hata ±13 m'ye kadar).
+YOLO_GEO_PROJECT = os.environ.get("YOLO_GEO_PROJECT", "1") == "1"
+# Kare ile GPS örneği arasındaki ARTIK gecikme (sn), ölçülen GPS yaşının üstüne
+# eklenir. Pozitif = kare, sandığımızdan daha yeni (İHA daha ileride).
+# NEDEN: build_20260721_105828 loglarındaki tespitler worlds/*.sdf'teki gerçek
+# kutu konumlarına göre rota boyunca sistematik olarak ~6.5-11 m GERİDE
+# çıkıyordu. Sebep MAVROS GPS'inin düşük hızda yayınlanması: kullanılan konum
+# örneği kareden ~0.5 sn eskiydi (14 m/s × 0.5 s ≈ 7 m). Bu yüzden telafi sabit
+# bir sayı değil, örneğin GERÇEK YAŞI (now - gps_zaman_damgası) üzerinden
+# yapılır; aşağıdaki sabit yalnızca kamera/köprü kuyruk gecikmesi içindir.
+# Ölçmek için: bir uçuş logundaki object_latitude/longitude'u worlds/*.sdf
+# pose'larıyla karşılaştır (ortalama hata bu değerle minimize edilir).
+YOLO_GEO_LAG_SEC = float(os.environ.get("YOLO_GEO_LAG_SEC", "0.0"))
+# Aynı fiziksel cismi kareler arası eşleştirme yarıçapı (m). Kare hızı düşük
+# (~2 FPS) olduğu için görüntü-uzayı IoU eşleşmesi çalışmıyordu: aynı kutu her
+# karede yeni ID alıyor, hits hep 1 kalıyor, QR aynı cisim için defalarca
+# çözülüyordu. Yer koordinatı üzerinden eşleşme kare hızından bağımsızdır.
+YOLO_GEO_MATCH_M = float(os.environ.get("YOLO_GEO_MATCH_M", "6.0"))
+# Bir yer-izinin (geo track) canlı sayıldığı süre (sn).
+YOLO_GEO_TRACK_TTL = float(os.environ.get("YOLO_GEO_TRACK_TTL", "60.0"))
 YOLO_MIN_OBJ_M = float(os.environ.get("YOLO_MIN_OBJ_M", "1.2"))
 YOLO_MAX_OBJ_M = float(os.environ.get("YOLO_MAX_OBJ_M", "9.0"))
 # İnsana özel alt sınır: tepeden bakışta bir insanın ayak izi GERÇEKTEN küçük.
@@ -239,13 +263,19 @@ class DetectionObjectLog(BaseModel):
 
 
 class YoloDetectionLog(BaseModel):
-    schema_version: str = "1.2"
+    # 1.3: hedefin kendi yer koordinatı (object_latitude/longitude) eklendi;
+    # latitude/longitude alanları İHA'nın konumu olmayı sürdürür.
+    schema_version: str = "1.3"
     event_type: Literal["object_detection"] = "object_detection"
     timestamp: datetime
     local_time: str
     uav_altitude_m: Optional[float] = None
     latitude: Optional[float] = None
     longitude: Optional[float] = None
+    object_latitude: Optional[float] = Field(
+        default=None, description="Hedefin yerdeki enlemi (bbox merkezinin geo-projeksiyonu)")
+    object_longitude: Optional[float] = Field(
+        default=None, description="Hedefin yerdeki boylamı (bbox merkezinin geo-projeksiyonu)")
     object: DetectionObjectLog
     track_id: Optional[int] = None
     bbox_xyxy: Optional[List[float]] = None
@@ -267,8 +297,11 @@ class YoloDetectionLog(BaseModel):
             alt_part = f"İHA {self.uav_altitude_m:.0f}m irtifadayken, "
         else:
             alt_part = "İHA irtifası bilinmezken, "
-        if self.latitude is not None and self.longitude is not None:
-            coord_part = f"[{self.latitude:.6f}, {self.longitude:.6f}] koordinatında"
+        # Mesajda hedefin KENDİ koordinatı gösterilir (varsa); yoksa İHA'nınki.
+        obj_lat = self.object_latitude if self.object_latitude is not None else self.latitude
+        obj_lon = self.object_longitude if self.object_longitude is not None else self.longitude
+        if obj_lat is not None and obj_lon is not None:
+            coord_part = f"[{obj_lat:.6f}, {obj_lon:.6f}] koordinatında"
         else:
             coord_part = "koordinatı henüz alınamadan"
         cat_part = f" (kategori: {self.object.normalized_category})"
@@ -493,6 +526,13 @@ class GazeboYoloNode(Node):
         self.latitude = None
         self.longitude = None
         self.altitude = None
+        self.heading_deg = 0.0
+        # Zaman damgalı GPS tamponu (yer hızı + gecikme telafisi için).
+        self.gps_buf = deque(maxlen=60)
+        # Yer koordinatına çıpalanmış izler: {"id", "category", "lat", "lon",
+        # "hits", "last_seen"}. Aynı fiziksel cisim kareler arası buradan
+        # eşleşir (bkz. assign_object_id).
+        self.geo_tracks = []
 
         qos_profile = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -562,6 +602,9 @@ class GazeboYoloNode(Node):
                 and not math.isnan(msg.latitude) and not math.isnan(msg.longitude)):
             self.latitude = float(msg.latitude)
             self.longitude = float(msg.longitude)
+            # Zaman damgalı konum tamponu: yer hızı buradan türetilir (gecikme
+            # telafisi için), ölçüm gürültüsüne karşı ~1 sn'lik pencere kullanılır.
+            self.gps_buf.append((time.time(), self.latitude, self.longitude))
             # Kat edilen yolu biriktir (ego bölgesi onayı için). Alt eşik park
             # halindeki GPS gürültüsünün yol gibi birikmesini, üst eşik ise
             # EKF/GPS ilk kilitlenmesindeki sıçramanın tek adımda yüzlerce metre
@@ -575,6 +618,93 @@ class GazeboYoloNode(Node):
 
     def pose_cb(self, msg):
         self.altitude = float(msg.pose.position.z)
+        # Pusula yönü (0=Kuzey, saat yönünde artar). MAVROS local_position/pose
+        # ENU'dur: yaw Doğu ekseninden CCW ölçülür (kuzeye uçarken yaw=+90°).
+        # threads/telemetri_t.py ile AYNI dönüşüm — geo-projeksiyonun kareyi
+        # kuzeye hizalaması buna dayanır.
+        try:
+            q = msg.pose.orientation
+            siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+            yaw = math.atan2(siny_cosp, cosy_cosp)
+            self.heading_deg = (90.0 - math.degrees(yaw)) % 360.0
+        except Exception:
+            pass
+
+    def ground_velocity(self):
+        """GPS tamponundan (kuzey, doğu) yer hızı (m/s). Veri yetersizse (0,0)."""
+        if len(self.gps_buf) < 2:
+            return 0.0, 0.0
+        t1, lat1, lon1 = self.gps_buf[-1]
+        # ~1 sn geriye git: tek adım GPS gürültüsü hızda büyük sıçrama yaratır.
+        t0, lat0, lon0 = self.gps_buf[0]
+        for t, la, lo in reversed(self.gps_buf):
+            if t1 - t >= 1.0:
+                t0, lat0, lon0 = t, la, lo
+                break
+        dt = t1 - t0
+        if dt <= 0.05:
+            return 0.0, 0.0
+        vn = (lat1 - lat0) * 111000.0 / dt
+        ve = (lon1 - lon0) * 111000.0 * math.cos(math.radians(lat1)) / dt
+        return vn, ve
+
+    def pose_snapshot(self):
+        """Karenin işlenmeye BAŞLADIĞI andaki poz (konum/irtifa/yön/hız).
+
+        Çıkarım CPU'da ~0.3-0.5 sn sürdüğü için eskiden tespitlere çıkarım
+        BİTTİKTEN sonraki GPS yazılıyordu; hedefler rota boyunca ~10 m geride
+        işaretleniyordu. Kare başında bir kez örnekleyip bütün kare boyunca aynı
+        pozu kullanmak bu hatayı ortadan kaldırır."""
+        vn, ve = self.ground_velocity()
+        now = time.time()
+        # Kullanılan GPS örneğinin yaşı: MAVROS konumu kameradan çok daha seyrek
+        # yayınlıyor, bu yüzden "en güncel" konum bile kareden eski olabilir.
+        gps_age = (now - self.gps_buf[-1][0]) if self.gps_buf else 0.0
+        return {
+            "t": now,
+            "lat": self.latitude,
+            "lon": self.longitude,
+            "alt": self.altitude,
+            "heading": self.heading_deg,
+            "vn": vn,
+            "ve": ve,
+            "gps_age": max(0.0, min(2.0, gps_age)),   # saçma değerlere karşı sınırla
+        }
+
+    def project_to_ground(self, bbox, frame_w, frame_h, pose):
+        """bbox merkezinin YERDEKİ koordinatını (lat, lon) döner; hesaplanamazsa
+        (irtifa/GPS yok, geo-projeksiyon kapalı) (None, None).
+
+        Nadir kamera: görüntü merkezinden sapma × (1/px_per_m) = metre cinsinden
+        sağa/ileri kayma. Görüntüde YUKARI = uçuş yönü (ileri) — bu, uçuş
+        loglarındaki kutuların hareket yönüyle doğrulandı. Sonra yön (heading)
+        ile kuzey/doğu bileşenlerine çevrilir ve İHA konumuna eklenir.
+        YOLO_GEO_LAG_SEC kadar geri (hız × gecikme) düzeltme uygulanır."""
+        if not YOLO_GEO_PROJECT or bbox is None:
+            return None, None
+        lat, lon, alt = pose.get("lat"), pose.get("lon"), pose.get("alt")
+        if lat is None or lon is None or alt is None or alt <= 1.0:
+            return None, None
+        ground_w = 2.0 * alt * math.tan(YOLO_CAM_HFOV / 2.0)
+        if ground_w <= 0.0 or frame_w <= 0:
+            return None, None
+        scale = frame_w / ground_w            # piksel / metre
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        right_m = (cx - frame_w / 2.0) / scale
+        fwd_m = -(cy - frame_h / 2.0) / scale
+        hd = math.radians(pose.get("heading") or 0.0)
+        north = fwd_m * math.cos(hd) - right_m * math.sin(hd)
+        east = fwd_m * math.sin(hd) + right_m * math.cos(hd)
+        # Konum örneği kareden eski: İHA bu sürede ilerlediği için konumu
+        # yer hızıyla İLERİ taşı (ölçülen GPS yaşı + artık gecikme sabiti).
+        dt = pose.get("gps_age", 0.0) + YOLO_GEO_LAG_SEC
+        north += pose.get("vn", 0.0) * dt
+        east += pose.get("ve", 0.0) * dt
+        obj_lat = lat + north / 111000.0
+        obj_lon = lon + east / (111000.0 * math.cos(math.radians(lat)))
+        return round(obj_lat, 7), round(obj_lon, 7)
 
     def px_per_m(self, frame_w: int) -> Optional[float]:
         """Nadir kamerada 1 metrenin kaç piksel ettiği; irtifa yoksa None.
@@ -600,6 +730,12 @@ class GazeboYoloNode(Node):
             if t - self.last_infer_time < self.min_infer_interval:
                 return
             self.last_infer_time = t
+
+        # Pozu ÇIKARIMDAN ÖNCE örnekle: aşağıdaki bütün konum işleri (başlangıç
+        # bölgesi kapısı, hedef geo-projeksiyonu, log kaydı) bu kareye ait pozu
+        # kullanır. Eskiden çıkarım bittikten sonraki (0.3-0.5 sn daha yeni) GPS
+        # okunuyordu ve hedefler rota boyunca geride işaretleniyordu.
+        pose = self.pose_snapshot()
 
         effective_conf = self.dynamic_conf()
 
@@ -724,10 +860,10 @@ class GazeboYoloNode(Node):
                         continue
 
                     # Başlangıç ve kalkış bölgesi bastırması (0-150m, irtifa < 10m veya GPS henüz alınmadıysa)
-                    if self.latitude is None or self.longitude is None:
+                    if pose["lat"] is None or pose["lon"] is None:
                         continue
-                    dist_to_start = self.distance_m(39.920782, 32.854115, self.latitude, self.longitude)
-                    if dist_to_start < 150.0 or (self.altitude is not None and self.altitude < 10.0):
+                    dist_to_start = self.distance_m(39.920782, 32.854115, pose["lat"], pose["lon"])
+                    if dist_to_start < 150.0 or (pose["alt"] is not None and pose["alt"] < 10.0):
                         continue
 
                     candidates.append({
@@ -799,8 +935,15 @@ class GazeboYoloNode(Node):
                         bbox = None
 
                 norm_cat = normalize_category(class_name)
-                # BÜTÜN tespitlere benzersiz integer ID ataması (ByteTrack atayamadıysa fallback takipçi çalışır)
-                final_id, hits = self.assign_object_id(raw_track_id, norm_cat, bbox)
+                # Hedefin YERDEKİ koordinatı (İHA'nınki değil): haritada cisim
+                # kendi yerine düşer ve aynı cisim kareler arası buradan eşleşir.
+                obj_lat, obj_lon = self.project_to_ground(
+                    bbox, frame.shape[1], frame.shape[0], pose
+                )
+                # BÜTÜN tespitlere benzersiz integer ID ataması (yer eşleşmesi →
+                # ByteTrack → IoU fallback sırasıyla)
+                final_id, hits = self.assign_object_id(raw_track_id, norm_cat, bbox,
+                                                       obj_lat, obj_lon)
 
                 det_list.append({
                     "cls": class_name,
@@ -809,13 +952,15 @@ class GazeboYoloNode(Node):
                     "track_id": final_id,
                     "bbox": bbox,
                     "hits": hits,
+                    "lat": obj_lat,
+                    "lon": obj_lon,
                 })
 
         # Tiling: tam kare az/hiç tespit verdiyse kareyi parçalayıp küçük cisimleri
         # kurtarmayı dene. Yeni tespitleri det_list'e ekle ve annotated'a manuel çiz.
         if YOLO_ENABLE_TILING and len(det_list) < YOLO_TILE_MIN_DETS:
             annotated = self._merge_tile_detections(
-                frame, annotated, det_list, effective_conf, frame_area
+                frame, annotated, det_list, effective_conf, frame_area, pose
             )
 
         # min_hits: track_id olan hedeflerden yeterince tutarlı görülmeyenleri
@@ -914,7 +1059,7 @@ class GazeboYoloNode(Node):
                     )
                 )
                 self.publish_detections(det_list)
-                self.log_detections(det_list, effective_conf)
+                self.log_detections(det_list, effective_conf, pose)
                 self.last_log_time = now
         else:
             # Cisim gösterim eşiğini geçemedi ama model zayıf bir aday buldu:
@@ -948,7 +1093,11 @@ class GazeboYoloNode(Node):
                 f"travel={self.travel_m:.0f}m conf={effective_conf:.2f} "
                 f"iou={YOLO_IOU_THRESHOLD:.2f} imgsz={YOLO_IMGSZ} "
                 f"preprocess={self.preprocess_mode} "
-                f"tiling={int(YOLO_ENABLE_TILING)}"
+                f"tiling={int(YOLO_ENABLE_TILING)} "
+                # Geo tanılama: kaç ayrı fiziksel hedef izleniyor ve konum
+                # örneği ne kadar eski (gecikme telafisi bunun üstüne kurulu).
+                f"geo_tracks={len(self.geo_tracks)} "
+                f"gps_age={pose.get('gps_age', 0.0):.2f}s"
             )
             try:
                 print(json.dumps({
@@ -961,6 +1110,8 @@ class GazeboYoloNode(Node):
                     "imgsz": YOLO_IMGSZ,
                     "preprocess": self.preprocess_mode,
                     "tiling": YOLO_ENABLE_TILING,
+                    "geo_tracks": len(self.geo_tracks),
+                    "gps_age_s": round(pose.get("gps_age", 0.0), 3),
                 }), flush=True)
             except Exception as e:
                 self.get_logger().warn(f"Metrik loglama hatası: {e}")
@@ -1089,17 +1240,19 @@ class GazeboYoloNode(Node):
         except Exception:
             pass
 
-    def _merge_tile_detections(self, frame, annotated, det_list, effective_conf, frame_area):
+    def _merge_tile_detections(self, frame, annotated, det_list, effective_conf, frame_area,
+                               pose=None):
         """Tile tespitlerini filtreleyip (bbox-frac, başlangıç bastırma, eşik)
         det_list'e ekler ve annotated kareye manuel kutu çizer. Güncellenmiş
         annotated kareyi döndürür."""
         tile_dets = self.run_tiles(frame, min(effective_conf, YOLO_RAW_CONF))
+        p = pose or {"lat": self.latitude, "lon": self.longitude, "alt": self.altitude}
         suppress_start = False
-        if self.latitude is None or self.longitude is None:
+        if p.get("lat") is None or p.get("lon") is None:
             suppress_start = True
         else:
-            dist_to_start = self.distance_m(39.920782, 32.854115, self.latitude, self.longitude)
-            if dist_to_start < 150.0 or (self.altitude is not None and self.altitude < 10.0):
+            dist_to_start = self.distance_m(39.920782, 32.854115, p["lat"], p["lon"])
+            if dist_to_start < 150.0 or (p.get("alt") is not None and p["alt"] < 10.0):
                 suppress_start = True
         for td in tile_dets:
             norm_cat = normalize_category(td["cls"])
@@ -1135,7 +1288,18 @@ class GazeboYoloNode(Node):
             if any(self._iou(bbox, d.get("bbox")) >= 0.4 for d in det_list):
                 continue
             td["category"] = normalize_category(td["cls"])
-            td["hits"] = 1
+            # Tile tespitleri de tam-kare yolundakiyle aynı yer koordinatını ve
+            # kararlı ID'yi alır; aksi halde haritada İHA konumuna düşüp her
+            # karede yeni hedef gibi görünüyorlardı.
+            if pose is not None:
+                td["lat"], td["lon"] = self.project_to_ground(
+                    bbox, frame.shape[1], frame.shape[0], pose
+                )
+                td["track_id"], td["hits"] = self.assign_object_id(
+                    None, td["category"], bbox, td["lat"], td["lon"]
+                )
+            else:
+                td["hits"] = 1
             det_list.append(td)
             # Annotated'a manuel çiz (tile tespitleri plot()'a girmez).
             if bbox is not None:
@@ -1261,14 +1425,50 @@ class GazeboYoloNode(Node):
                     })
         return dets
 
-    def assign_object_id(self, track_id: Optional[int], category: str, bbox: Optional[List[float]]) -> Tuple[int, int]:
-        """ByteTrack ID atayamadıysa bile centroid/IoU bazlı fallback takipçi ile HER tespitedilmiş nesneye benzersiz bir integer ID ve hits atar. ID asla None kalmaz."""
+    def assign_object_id(self, track_id: Optional[int], category: str, bbox: Optional[List[float]],
+                         obj_lat: Optional[float] = None, obj_lon: Optional[float] = None) -> Tuple[int, int]:
+        """Her tespite kararlı bir integer ID ve hits (kaç kez görüldü) atar.
+
+        Sıra: (1) YER KOORDİNATI eşleşmesi — aynı kategoriden bir iz
+        YOLO_GEO_MATCH_M metre içindeyse aynı cisimdir; (2) ByteTrack ID;
+        (3) görüntü-uzayı IoU fallback'i. Yer eşleşmesi ÖNCE gelir çünkü çıkarım
+        ~2 FPS koştuğunda cisim kareler arasında yüzlerce piksel yer değiştirir:
+        IoU de ByteTrack de kopar, aynı kutu her karede yeni ID alır (hits hep 1,
+        QR defalarca çözülür, tabloda onlarca sahte satır açılır). Yer koordinatı
+        kare hızından bağımsızdır. ID asla None kalmaz."""
+        now = time.time()
+
+        if obj_lat is not None and obj_lon is not None:
+            self.geo_tracks = [t for t in self.geo_tracks
+                               if now - t["last_seen"] <= YOLO_GEO_TRACK_TTL]
+            best, best_d = None, YOLO_GEO_MATCH_M
+            for trk in self.geo_tracks:
+                if trk["category"] != category:
+                    continue
+                d = self.distance_m(trk["lat"], trk["lon"], obj_lat, obj_lon)
+                if d < best_d:
+                    best, best_d = trk, d
+            if best is not None:
+                best["hits"] += 1
+                best["last_seen"] = now
+                # Konumu yumuşat: her yeni gözlem izin konumunu biraz çeker,
+                # tek karelik projeksiyon gürültüsü izi kaçırmaz.
+                best["lat"] += (obj_lat - best["lat"]) * 0.3
+                best["lon"] += (obj_lon - best["lon"]) * 0.3
+                return best["id"], best["hits"]
+            new_id = self.next_fallback_id
+            self.next_fallback_id += 1
+            self.geo_tracks.append({
+                "id": new_id, "category": category, "lat": obj_lat, "lon": obj_lon,
+                "hits": 1, "last_seen": now,
+            })
+            return new_id, 1
+
         if track_id is not None:
             hits = self.track_hits.get(track_id, 0) + 1
             self.track_hits[track_id] = hits
             return track_id, hits
 
-        now = time.time()
         matched_track = None
         if bbox is not None:
             best_iou = 0.2
@@ -1397,6 +1597,10 @@ class GazeboYoloNode(Node):
                     "bbox": d["bbox"],
                     "hits": d.get("hits", 1),
                     "qr_text": d.get("qr_text"),
+                    # Hedefin kendi yer koordinatı (geo-projeksiyon). None ise
+                    # arayüz eskisi gibi İHA konumuna düşer.
+                    "lat": d.get("lat"),
+                    "lon": d.get("lon"),
                 }
                 for d in det_list
             ],
@@ -1408,19 +1612,23 @@ class GazeboYoloNode(Node):
         except Exception:
             pass
 
-    def log_detections(self, det_list, effective_conf):
+    def log_detections(self, det_list, effective_conf, pose=None):
         """Her tespit edilen cisim için Pydantic ile doğrulanmış tek satır JSONL
-        kaydı yazar. stdout, app.py tarafından yolo.log dosyasına yönlendirilir."""
+        kaydı yazar. stdout, app.py tarafından yolo.log dosyasına yönlendirilir.
+        `pose` verilirse (karenin başındaki poz) İHA konumu oradan yazılır."""
         now = datetime.now(LOCAL_TZ)
         tracker = "bytetrack" if self.use_tracking else "none"
+        pose = pose or {}
         for d in det_list:
             try:
                 record = YoloDetectionLog(
                     timestamp=now,
                     local_time=now.strftime("%H:%M"),
-                    uav_altitude_m=self.altitude,
-                    latitude=self.latitude,
-                    longitude=self.longitude,
+                    uav_altitude_m=pose.get("alt", self.altitude),
+                    latitude=pose.get("lat", self.latitude),
+                    longitude=pose.get("lon", self.longitude),
+                    object_latitude=d.get("lat"),
+                    object_longitude=d.get("lon"),
                     object=DetectionObjectLog(
                         label=d["cls"],
                         normalized_category=d.get("category", normalize_category(d["cls"])),
